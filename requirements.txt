@@ -1,0 +1,11 @@
+PyQt6
+PyMuPDF
+python-docx
+python-pptx
+openpyxl
+sentence-transformers
+google-generativeai
+send2trash
+numpy
+python-dotenv
+openai

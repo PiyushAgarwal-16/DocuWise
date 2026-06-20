@@ -6,6 +6,7 @@ import Duplicates from "./pages/Duplicates";
 import ImagePdfs from "./pages/ImagePdfs";
 import Cleanup from "./pages/Cleanup";
 import Settings from "./pages/Settings";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { useState } from "react";
 
 function App() {
@@ -14,15 +15,17 @@ function App() {
   return (
     <Router>
       <AppShell folder={folder} setFolder={setFolder}>
-        <Routes>
-          <Route path="/" element={<Navigate to="/dashboard" replace />} />
-          <Route path="/dashboard" element={<Dashboard folder={folder} />} />
-          <Route path="/documents" element={<Documents folder={folder} />} />
-          <Route path="/duplicates" element={<Duplicates folder={folder} />} />
-          <Route path="/image-pdfs" element={<ImagePdfs folder={folder} />} />
-          <Route path="/cleanup" element={<Cleanup folder={folder} />} />
-          <Route path="/settings" element={<Settings />} />
-        </Routes>
+        <ErrorBoundary>
+          <Routes>
+            <Route path="/" element={<Navigate to="/dashboard" replace />} />
+            <Route path="/dashboard" element={<Dashboard folder={folder} />} />
+            <Route path="/documents" element={<Documents folder={folder} />} />
+            <Route path="/duplicates" element={<Duplicates folder={folder} />} />
+            <Route path="/image-pdfs" element={<ImagePdfs folder={folder} />} />
+            <Route path="/cleanup" element={<Cleanup folder={folder} />} />
+            <Route path="/settings" element={<Settings />} />
+          </Routes>
+        </ErrorBoundary>
       </AppShell>
     </Router>
   );

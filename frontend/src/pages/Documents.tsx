@@ -15,6 +15,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 
 export default function Documents({ folder }: { folder?: string }) {
   const [docs, setDocs] = useState<DocumentData[]>([]);
@@ -56,8 +57,8 @@ export default function Documents({ folder }: { folder?: string }) {
   };
 
   return (
-    <div className="flex h-full animate-in fade-in">
-      <div className="flex-1 flex flex-col min-w-0 border-r border-border bg-background">
+    <ResizablePanelGroup direction="horizontal" className="flex h-full animate-in fade-in">
+      <ResizablePanel defaultSize={65} minSize={30} className="flex flex-col min-w-0 bg-background">
         <div className="p-4 border-b border-border flex items-center gap-4">
           <form onSubmit={handleSearch} className="flex-1 relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
@@ -113,15 +114,17 @@ export default function Documents({ folder }: { folder?: string }) {
             </TableBody>
           </Table>
         </ScrollArea>
-      </div>
+      </ResizablePanel>
 
-      <div className="w-[350px] bg-panel flex flex-col h-full shrink-0">
+      <ResizableHandle withHandle />
+
+      <ResizablePanel defaultSize={35} minSize={20} className="bg-panel flex flex-col h-full shrink-0">
         {selected ? (
           <ScrollArea className="flex-1">
             <div className="p-6 space-y-6">
               <div>
                 <h3 className="text-lg font-semibold break-words leading-tight">{selected.filename}</h3>
-                <p className="text-xs text-muted-foreground mt-1 truncate" title={selected.file_path}>
+                <p className="text-xs text-muted-foreground mt-1 break-all" title={selected.file_path}>
                   {selected.file_path}
                 </p>
               </div>
@@ -169,8 +172,8 @@ export default function Documents({ folder }: { folder?: string }) {
             Select a document to view its details and actions.
           </div>
         )}
-      </div>
-    </div>
+      </ResizablePanel>
+    </ResizablePanelGroup>
   );
 }
 

@@ -19,8 +19,26 @@ export default function Dashboard({ folder }: { folder?: string }) {
     });
   }, [folder]);
 
-  if (loading) return <div className="p-8 text-muted-foreground">Loading dashboard...</div>;
-  if (!stats) return <div className="p-8 text-destructive">Failed to load stats.</div>;
+  if (loading) return (
+    <div className="flex flex-col items-center justify-center h-full p-8 text-muted-foreground animate-pulse">
+      <div className="w-8 h-8 border-4 border-primary border-t-transparent rounded-full animate-spin mb-4"></div>
+      <p className="text-lg font-medium">Connecting to AI Engine...</p>
+      <p className="text-sm">Please wait, starting local models may take 10-20 seconds.</p>
+    </div>
+  );
+  if (!stats) return (
+    <div className="h-full flex flex-col items-center justify-center p-8 text-center animate-in fade-in">
+      <div className="w-16 h-16 bg-muted/50 rounded-full flex items-center justify-center mb-6">
+        <svg className="w-8 h-8 text-muted-foreground" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+      </div>
+      <h2 className="text-xl font-semibold mb-2">Service Unavailable</h2>
+      <p className="text-muted-foreground max-w-md">
+        DocuWise couldn't connect to the local processing engine. Ensure the backend models have successfully loaded and aren't blocked by your firewall.
+      </p>
+    </div>
+  );
 
   return (
     <div className="h-full overflow-y-auto p-8 space-y-8 animate-in fade-in">

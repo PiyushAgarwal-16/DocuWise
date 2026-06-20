@@ -1,25 +1,29 @@
 # DocuWise
 
-DocuWise is an intelligent, locally-run desktop document manager that leverages AI (NVIDIA NIM and Google Gemini) to extract, analyze, and automatically organize your documents, finding duplicates and highlighting key files so you can save time and storage space.
+DocuWise is a high-performance, modern, locally-run desktop document manager. It leverages cutting-edge AI (NVIDIA NIM and Google Gemini) to extract, analyze, and automatically organize your documents, finding duplicates and highlighting key files so you can save time and storage space.
 
-## Features
+Recently rebuilt with a blazing-fast **React + Tauri** architecture, DocuWise offers a sleek, responsive native desktop experience backed by a robust Python FastAPI engine and local SQLite database.
+
+## ✨ Features
 - **AI-Powered Analysis**: Automatically categorizes files, generates subjects, summaries, and determines importance.
-- **Duplicate Detection**: Finds similar and identical documents based on content embeddings to help you save space.
-- **Local SQLite Database**: All metadata is stored locally and stays on your machine.
-- **Desktop UI**: A modern PyQt6 interface to manage and browse your scanned folders.
-- **Resilient Pipeline**: Gracefully handles missing files, errors, and rate limits without crashing.
+- **Advanced Duplicate Detection**: Uses local ML models (`SentenceTransformers`) to compute content embeddings, finding identical and semantically similar documents to help you save space.
+- **Local-First Privacy**: Your SQLite database and file embeddings are stored entirely locally on your machine.
+- **Modern Desktop UI**: A beautiful, fluid interface built with React, TailwindCSS, and Shadcn UI, deployed natively via Tauri.
+- **Resilient Pipeline**: Gracefully handles massive datasets, missing files, errors, and API rate limits.
 
 ---
 
 ## 🛠️ Prerequisites
 
 Before you begin, ensure you have the following installed on your system:
-- **Python 3.10+** (Python 3.12 is recommended)
+- **Python 3.10+** (Required for the backend API and document processing pipeline)
+- **Node.js 18+** (Required for the frontend React application)
+- **Rust & Cargo** (Required to compile the Tauri native desktop application)
 - **Git**
 
 You will also need API keys for the AI providers:
 - **NVIDIA NIM API Key** (Primary): Obtain from [build.nvidia.com](https://build.nvidia.com/)
-- **Google Gemini API Key** (Secondary): Obtain from [aistudio.google.com](https://aistudio.google.com/)
+- **Google Gemini API Key** (Secondary fallback): Obtain from [aistudio.google.com](https://aistudio.google.com/)
 
 ---
 
@@ -32,76 +36,97 @@ git clone https://github.com/yourusername/DocuWise.git
 cd DocuWise
 ```
 
-### 2. Create a Virtual Environment
-It is highly recommended to isolate the project dependencies. Run the following command in the project directory:
+### 2. Set Up the Python Backend
+The Python backend handles the database, AI extraction, and machine learning models.
 
 **Windows:**
 ```cmd
 python -m venv venv
 venv\Scripts\activate
+pip install -r requirements.txt
 ```
 
 **macOS/Linux:**
 ```bash
 python3 -m venv venv
 source venv/bin/activate
-```
-
-### 3. Install Dependencies
-With the virtual environment activated, install the required packages:
-```bash
 pip install -r requirements.txt
 ```
 
----
+### 3. Configure API Keys
+Your API keys must **NOT** be placed directly inside the code to prevent them from being leaked.
 
-## 🔑 Configuring API Keys (Important!)
-
-Your API keys must **NOT** be placed directly inside the code (e.g., `config.py`) to prevent them from being accidentally pushed to GitHub.
-
-DocuWise uses a `.env` file to securely load these keys.
-
-1. In the root directory of the project, you will find a file named `.env.example`.
-2. **Create a new file** in the same directory and name it `.env`.
-3. Open the `.env` file and add your actual API keys like this:
-
+1. In the root directory, locate the `.env.example` file.
+2. **Create a new file** named `.env`.
+3. Add your actual API keys to the `.env` file like this:
 ```ini
 NVIDIA_API_KEY=your_actual_nvidia_key_here
 GEMINI_API_KEY=your_actual_gemini_key_here
 ```
 
-*(Note: The `.env` file is already listed in `.gitignore`, so it will be safely ignored by Git.)*
+### 4. Set Up the React/Tauri Frontend
+Navigate to the `frontend` directory and install the Node dependencies:
+```bash
+cd frontend
+npm install
+cd ..
+```
 
 ---
 
 ## 🖥️ Running the Application
 
-Once your virtual environment is active and your `.env` file is set up, you can launch the DocuWise desktop interface by running:
+### On Windows
+We have provided a convenient batch script that automatically manages the backend and frontend processes for you.
 
+Simply run:
+```powershell
+.\dev.bat
+```
+*(This script will launch the FastAPI server in the background, start the Tauri desktop app, and automatically clean up the server when you close the app.)*
+
+### On macOS / Linux
+You will need to run the backend and the frontend simultaneously in two separate terminal windows.
+
+**Terminal 1 (Backend):**
 ```bash
-python main.py
+source venv/bin/activate
+python api_server.py
 ```
 
-### How to use:
-1. When the UI opens, click **"Browse Folder"** and select a folder containing the documents you want to organize.
-2. Click **"Scan Documents"**. The pipeline will run in the background (Extracting text -> AI Analysis -> Generating Embeddings).
-3. Review your documents in the table, check the **Duplicates** panel to save space, and view your **Category Distribution**!
+**Terminal 2 (Frontend):**
+```bash
+cd frontend
+npm run tauri dev
+```
+
+---
+
+## 🧹 Utilities
+
+### Resetting the Database
+If you are testing the application and want to wipe your `docuwise.db` clean to rescan the exact same documents, we've provided a safe reset script.
+
+**On Windows:**
+Press `Ctrl+C` in your terminal to stop any running processes, then run:
+```powershell
+.\reset_db.bat
+```
+This will automatically wipe the database so the system can generate a fresh one on your next boot.
 
 ---
 
 ## 📁 Project Structure
 
-- `main.py` - Entry point for the PyQt6 desktop application.
-- `config.py` - Central configuration and settings (loads API keys via python-dotenv).
-- `core/` - The backend engine.
+- `api_server.py` - The FastAPI bridge that connects the UI to the Python engine.
+- `dev.bat` / `reset_db.bat` - Process management utilities for Windows.
+- `core/` - The Python backend engine.
   - `pipeline.py` - Orchestrates the scan, extract, analyze, and embed stages.
-  - `scanner.py` - Discovers files on the filesystem.
-  - `extractor.py` - Extracts text from PDFs, DOCX, PPTX, etc.
-  - `analyzer.py` - Calls NVIDIA NIM or Gemini to classify and summarize text.
-  - `embedder.py` - Generates vector embeddings for duplicate detection.
+  - `analyzer.py` - Calls NVIDIA NIM / Gemini to classify text.
+  - `embedder.py` - Generates vector embeddings using local HuggingFace ML models.
   - `database.py` - Local SQLite database operations.
-- `ui/` - The frontend application.
-  - `main_window.py` - The main dashboard layout and background worker.
-  - `document_table.py` - The interactive table and document details panel.
-  - `file_actions.py` - Shared helpers for opening files and right-click menus.
-- `storage/` - Automatically created directory where your local `docuwise.db` is stored.
+- `frontend/` - The React + Tauri user interface.
+  - `src-tauri/` - Rust configuration for the native desktop window.
+  - `src/pages/` - Core UI views (Dashboard, Documents, Duplicates, etc).
+  - `src/services/api.ts` - TypeScript HTTP client to communicate with FastAPI.
+- `storage/` - Automatically created directory storing your local `docuwise.db`.

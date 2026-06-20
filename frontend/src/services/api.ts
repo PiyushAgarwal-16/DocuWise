@@ -10,12 +10,28 @@ import {
 
 const API_BASE = "/api";
 
-async function fetcher<T>(endpoint: string): Promise<T> {
-  const res = await fetch(`${API_BASE}${endpoint}`);
-  if (!res.ok) {
-    throw new Error(`API Error: ${res.status} ${res.statusText}`);
+async function fetcher<T>(endpoint: string, retries = 20, delayMs = 3000): Promise<T> {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const res = await fetch(`${API_BASE}${endpoint}`);
+      if (!res.ok) {
+        if (res.status === 502 || res.status === 504 || res.status === 503) {
+           throw new Error(`API Error: ${res.status} Bad Gateway`);
+        }
+        throw new Error(`API Error: ${res.status} ${res.statusText}`);
+      }
+      return await res.json();
+    } catch (e: any) {
+      // If it's a proxy error (502) or network error, wait and retry
+      if (i < retries - 1 && (e.message.includes('Failed to fetch') || e.message.includes('Bad Gateway') || e.message.includes('504') || e.message.includes('503'))) {
+        console.log(`Backend warming up, retrying ${endpoint} in ${delayMs}ms...`);
+        await new Promise(r => setTimeout(r, delayMs));
+        continue;
+      }
+      throw e;
+    }
   }
-  return res.json();
+  throw new Error(`Failed after ${retries} retries`);
 }
 
 function buildQuery(params: Record<string, string | undefined>): string {

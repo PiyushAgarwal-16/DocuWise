@@ -466,6 +466,90 @@ def update_document_status(
 # documents — read operations
 # ---------------------------------------------------------------------------
 
+def find_by_md5(md5_hash: str, exclude_file_path: str = "") -> Optional[dict]:
+    """
+    Return the first fully-processed document with the given MD5 hash.
+
+    Used by the pipeline to detect when a copied / moved / renamed file has
+    already been analyzed, so we can skip the LLM call and embedding step.
+
+    Args:
+        md5_hash:          Hex-digest to search for.
+        exclude_file_path: Path of the *current* document being processed —
+                           excluded from results so a document never matches itself.
+
+    Returns:
+        A document dict (all columns) if a cache source is found, else None.
+    """
+    conn = _connect()
+    with conn:
+        row = conn.execute(
+            """
+            SELECT * FROM documents
+             WHERE md5_hash = ?
+               AND processing_status IN ('embedded', 'analyzed', 'completed')
+               AND file_path != ?
+             ORDER BY updated_at DESC
+             LIMIT 1
+            """,
+            (md5_hash, exclude_file_path),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def copy_analysis_from_cache(
+    file_path: str,
+    source: dict,
+) -> None:
+    """
+    Copy all analysis + embedding data from *source* into *file_path*'s row
+    and set processing_status to 'embedded'.
+
+    This is the write-side of the MD5 cache: called when the pipeline finds
+    that a file's content was already fully processed under a different path.
+
+    Args:
+        file_path: Absolute path of the document being fast-tracked.
+        source:    Full document dict of the cache-source document.
+    """
+    now = _now()
+    conn = _connect()
+    with conn:
+        conn.execute(
+            """
+            UPDATE documents
+               SET summary            = ?,
+                   category           = ?,
+                   subject            = ?,
+                   tags_json          = ?,
+                   importance_score   = ?,
+                   deletion_candidate = ?,
+                   deletion_reason    = ?,
+                   highlight          = ?,
+                   highlight_reason   = ?,
+                   analysis_source    = 'cached',
+                   embedding_json     = ?,
+                   processing_status  = 'embedded',
+                   updated_at         = ?
+             WHERE file_path = ?
+            """,
+            (
+                source.get("summary"),
+                source.get("category"),
+                source.get("subject"),
+                source.get("tags_json"),
+                source.get("importance_score"),
+                source.get("deletion_candidate", 0),
+                source.get("deletion_reason"),
+                source.get("highlight", 0),
+                source.get("highlight_reason"),
+                source.get("embedding_json"),
+                now,
+                file_path,
+            ),
+        )
+
+
 def get_all_documents() -> list[dict]:
     """
     Return every document row ordered alphabetically by filename.

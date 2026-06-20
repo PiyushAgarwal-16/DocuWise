@@ -72,6 +72,10 @@ def open_containing_folder(file_path: str, parent: QWidget | None = None) -> Non
         )
 
 
+# Convenience alias used by new views.
+open_folder = open_containing_folder
+
+
 def copy_file_path(file_path: str) -> None:
     """Copy the absolute file path to the system clipboard."""
     if file_path:

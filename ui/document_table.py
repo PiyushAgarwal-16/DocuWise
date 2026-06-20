@@ -339,11 +339,17 @@ class DocumentTableWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._docs: list[dict] = []
+        self._folder_filter: str | None = None
         self._model = QStandardItemModel(0, len(_COLUMNS), self)
         self._model.setHorizontalHeaderLabels(_COLUMNS)
         self._proxy = _FilterProxy(self)
         self._proxy.setSourceModel(self._model)
         self._build_ui()
+        self.refresh()
+
+    def set_folder_filter(self, folder: str | None):
+        """Restrict the table to documents inside *folder*."""
+        self._folder_filter = folder
         self.refresh()
 
     def _build_ui(self):
@@ -431,7 +437,21 @@ class DocumentTableWidget(QWidget):
     # ── Data ─────────────────────────────────────────────────────────────────
 
     def refresh(self):
-        self._docs = get_all_documents()
+        if self._folder_filter:
+            like = self._folder_filter.rstrip("\\/") + "\\" + "%"
+            try:
+                conn = _connect()
+                rows = conn.execute(
+                    "SELECT * FROM documents WHERE file_path LIKE ?"
+                    " ORDER BY filename COLLATE NOCASE",
+                    (like,),
+                ).fetchall()
+                conn.close()
+                self._docs = [dict(r) for r in rows]
+            except Exception:
+                self._docs = []
+        else:
+            self._docs = get_all_documents()
         self._populate_table()
         self._refresh_category_dropdown()
         self._update_count_label()

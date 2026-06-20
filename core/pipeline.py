@@ -15,6 +15,7 @@ This module does NOT:
 """
 
 import logging
+import os
 import time
 from typing import Optional
 
@@ -22,6 +23,8 @@ from core.analyzer import analyze_document
 from core.database import (
     _connect,
     cleanup_missing_files,
+    copy_analysis_from_cache,
+    find_by_md5,
     get_documents_by_status,
     init_db,
     update_document_status,
@@ -85,7 +88,8 @@ def process_pending_documents(
         return {"processed": 0, "failed": 0, "skipped": 0, "image_only": 0}
 
     logger.info("Pipeline starting — %d pending document(s) to process.", total)
-    counters = {"processed": 0, "failed": 0, "skipped": 0, "image_only": 0}
+    counters = {"processed": 0, "failed": 0, "skipped": 0, "image_only": 0,
+                "cache_hits": 0, "cache_misses": 0}
 
     for index, doc in enumerate(pending, start=1):
         file_path: str = doc["file_path"]
@@ -96,8 +100,7 @@ def process_pending_documents(
         # ── Missing-file guard (Task 8) ──────────────────────────────────────
         # If the file was deleted between the scan and pipeline stages, mark
         # it as 'missing' and skip ALL processing stages immediately.
-        import os as _os
-        if not _os.path.exists(file_path):
+        if not os.path.exists(file_path):
             logger.warning(
                 "[MISSING] '%s' not found on disk — skipping all stages.", filename
             )
@@ -131,7 +134,37 @@ def process_pending_documents(
             _report_progress(progress_callback, index, total, filename)
             continue
 
-        # ── Stage 2: Analyze ─────────────────────────────────────────────────
+        # ── Stage 1b: MD5 Content Cache ──────────────────────────────────────
+        # After extraction the md5_hash is stored in the DB. Check if another
+        # document with the same hash was already fully processed. If so, copy
+        # its analysis + embedding directly — no LLM or embedder call needed.
+        try:
+            conn = _connect()
+            md5_row = conn.execute(
+                "SELECT md5_hash FROM documents WHERE file_path = ? LIMIT 1",
+                (file_path,),
+            ).fetchone()
+            conn.close()
+            current_md5 = md5_row["md5_hash"] if md5_row else None
+        except Exception:
+            current_md5 = None
+
+        if current_md5:
+            cache_source = find_by_md5(current_md5, exclude_file_path=file_path)
+            if cache_source:
+                src_name = cache_source.get("filename", "unknown")
+                logger.info(
+                    "[CACHE HIT] '%s' ← '%s' (md5=%s…)",
+                    filename, src_name, current_md5[:8],
+                )
+                _report_progress(progress_callback, index, total,
+                                 f"{filename}  [cache hit ← {src_name}]")
+                copy_analysis_from_cache(file_path, cache_source)
+                counters["cache_hits"]  += 1
+                counters["processed"]   += 1
+                continue   # skip Stage 2 (Analyze) and Stage 3 (Embed)
+
+        counters["cache_misses"] += 1
         try:
             analysis = analyze_document(file_path)
             if not analysis.success:
@@ -165,8 +198,10 @@ def process_pending_documents(
         _report_progress(progress_callback, index, total, filename)
 
     logger.info(
-        "Pipeline complete — processed=%d  failed=%d  image_only=%d  skipped=%d",
-        counters["processed"], counters["failed"], counters["image_only"], counters["skipped"],
+        "Pipeline complete — processed=%d  failed=%d  image_only=%d  skipped=%d"
+        "  cache_hits=%d  cache_misses=%d",
+        counters["processed"], counters["failed"], counters["image_only"],
+        counters["skipped"], counters["cache_hits"], counters["cache_misses"],
     )
     return counters
 
@@ -200,7 +235,7 @@ def rescue_stalled_documents() -> dict:
     case_a_rows = conn.execute("""
         SELECT file_path, filename FROM documents
         WHERE embedding_json IS NOT NULL
-          AND processing_status != 'embedded'
+          AND processing_status = 'failed'
     """).fetchall()
 
     case_a_fixed = 0

@@ -11,6 +11,7 @@ interface AppShellProps {
 
 export default function AppShell({ children, folder, setFolder }: AppShellProps) {
   const [scanning, setScanning] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   const handleScan = async () => {
     if (!folder) return;
@@ -22,6 +23,13 @@ export default function AppShell({ children, folder, setFolder }: AppShellProps)
     }
   };
 
+  const handleScanComplete = () => {
+    setScanning(false);
+    // Incrementing this key will force all child routes (like Dashboard)
+    // to unmount and remount, instantly refetching the latest stats!
+    setRefreshKey(prev => prev + 1);
+  };
+
   return (
     <div className="flex h-screen w-screen bg-background overflow-hidden text-foreground font-sans">
       <Sidebar 
@@ -31,10 +39,12 @@ export default function AppShell({ children, folder, setFolder }: AppShellProps)
         scanning={scanning} 
       />
       <main className="flex-1 relative h-screen overflow-hidden bg-background">
-        {children}
+        <div key={refreshKey} className="h-full w-full">
+          {children}
+        </div>
         {scanning && (
           <div className="absolute inset-0 z-50 bg-background/95 backdrop-blur-sm">
-            <ScanOverlay onComplete={() => setScanning(false)} />
+            <ScanOverlay onComplete={handleScanComplete} />
           </div>
         )}
       </main>

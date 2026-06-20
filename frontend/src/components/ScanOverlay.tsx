@@ -2,20 +2,33 @@ import { useEffect, useState, useRef } from "react";
 import { Card } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { ScanProgressEvent } from "@/services/types";
-import { Zap, Terminal } from "lucide-react";
+import { Zap, Terminal, XCircle } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Button } from "@/components/ui/button";
+import { api } from "@/services/api";
 
 interface ScanOverlayProps {
   onComplete: () => void;
 }
 
 export default function ScanOverlay({ onComplete }: ScanOverlayProps) {
-  const [stats, setStats] = useState({ current: 0, total: 1, elapsed: 0 });
+  const [stats, setStats] = useState({ current: 0, total: 1 });
+  const [elapsed, setElapsed] = useState(0);
   const [currentFile, setCurrentFile] = useState<string>("");
   const [stage, setStage] = useState<string>("Initializing...");
   const [logs, setLogs] = useState<string[]>([]);
-  const [status, setStatus] = useState<"processing" | "complete" | "error">("processing");
+  const [status, setStatus] = useState<"processing" | "complete" | "error" | "stopping">("processing");
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+    if (status === "processing") {
+      interval = setInterval(() => {
+        setElapsed((prev) => prev + 1);
+      }, 1000);
+    }
+    return () => clearInterval(interval);
+  }, [status]);
 
   useEffect(() => {
     const source = new EventSource("http://127.0.0.1:8765/api/scan/progress");
@@ -27,8 +40,7 @@ export default function ScanOverlay({ onComplete }: ScanOverlayProps) {
         if (data.type === "progress") {
           setStats({
             current: data.current || 0,
-            total: data.total || 1,
-            elapsed: data.elapsed_seconds || 0
+            total: data.total || 1
           });
           if (data.filename) setCurrentFile(data.filename.split(/[\\/]/).pop() || "");
           if (data.stage) setStage(data.stage);
@@ -42,7 +54,7 @@ export default function ScanOverlay({ onComplete }: ScanOverlayProps) {
         else if (data.type === "complete" || data.type === "error") {
           setStatus(data.type);
           source.close();
-          if (data.type === "error") {
+          if (data.type === "error" && data.error !== "Scan stopped by user") {
             alert("Scan failed: " + data.error);
           }
           setTimeout(() => onComplete(), 1500);
@@ -67,7 +79,17 @@ export default function ScanOverlay({ onComplete }: ScanOverlayProps) {
     }
   }, [logs]);
 
-  const { current, total, elapsed } = stats;
+  const handleStop = async () => {
+    try {
+      setStatus("stopping");
+      setStage("Stopping engine gracefully...");
+      await api.stopScan();
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const { current, total } = stats;
   const pct = Math.round((current / total) * 100) || 0;
   
   const rate = elapsed > 0 ? (current / elapsed) * 60 : 0;
@@ -83,13 +105,27 @@ export default function ScanOverlay({ onComplete }: ScanOverlayProps) {
 
   return (
     <div className="flex items-center justify-center h-full w-full p-8">
-      <Card className="w-full max-w-3xl bg-panel border-border shadow-2xl p-10 flex flex-col items-center animate-in fade-in zoom-in duration-300">
+      <Card className="w-full max-w-3xl bg-panel border-border shadow-2xl p-10 flex flex-col items-center animate-in fade-in zoom-in duration-300 relative">
+        {status === "processing" && (
+          <Button 
+            variant="ghost" 
+            size="sm" 
+            onClick={handleStop}
+            className="absolute top-4 right-4 text-muted-foreground hover:text-destructive transition-colors"
+          >
+            <XCircle className="w-4 h-4 mr-2" />
+            Stop Scan
+          </Button>
+        )}
+
         <div className="w-16 h-16 bg-primary/20 rounded-full flex items-center justify-center mb-6">
-          <Zap className="w-8 h-8 text-primary animate-pulse" />
+          <Zap className={`w-8 h-8 text-primary ${status === "processing" ? "animate-pulse" : ""}`} />
         </div>
         
         <h2 className="text-2xl font-bold text-foreground mb-2">
-          {status === "complete" ? "Scan Complete ✓" : "Processing Documents"}
+          {status === "complete" ? "Scan Complete ✓" : 
+           status === "stopping" ? "Stopping Scan..." :
+           status === "error" ? "Scan Stopped" : "Processing Documents"}
         </h2>
         
         <div className="text-center mb-8 h-12">
@@ -110,8 +146,8 @@ export default function ScanOverlay({ onComplete }: ScanOverlayProps) {
         <div className="grid grid-cols-4 gap-4 w-full mb-8">
           <MetricBox label="Progress" value={`${current}/${total}`} />
           <MetricBox label="Elapsed" value={formatTime(elapsed)} />
-          <MetricBox label="ETA" value={formatTime(eta)} />
-          <MetricBox label="Speed" value={`${Math.round(rate)}/min`} />
+          <MetricBox label="ETA" value={status === "processing" ? formatTime(eta) : "—"} />
+          <MetricBox label="Speed" value={status === "processing" ? `${Math.round(rate)}/min` : "—"} />
         </div>
 
         <div className="w-full bg-[#0a0a0c] border border-border/50 rounded-md p-3 h-40 flex flex-col">

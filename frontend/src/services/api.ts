@@ -72,5 +72,15 @@ export const api = {
       throw new Error(err.detail || "Failed to start scan");
     }
     return res.json();
+  },
+
+  stopScan: async () => {
+    const res = await fetch(`${API_BASE}/scan/stop`, {
+      method: "POST",
+    });
+    if (!res.ok) {
+      throw new Error("Failed to stop scan");
+    }
+    return res.json();
   }
 };

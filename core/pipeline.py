@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 
 def process_pending_documents(
     progress_callback: Optional[callable] = None,
+    is_cancelled: Optional[callable] = None,
 ) -> dict:
     """
     Drive every 'pending' document through the full three-stage pipeline.
@@ -63,6 +64,7 @@ def process_pending_documents(
                                callback(current: int, total: int, filename: str)
                            Useful for driving a UI progress bar without
                            coupling the pipeline to any specific UI framework.
+        is_cancelled: Optional callable that returns True if the scan should stop.
 
     Returns:
         Summary dict:
@@ -92,6 +94,10 @@ def process_pending_documents(
                 "cache_hits": 0, "cache_misses": 0}
 
     for index, doc in enumerate(pending, start=1):
+        if is_cancelled and is_cancelled():
+            logger.info("Scan cancelled by user.")
+            break
+
         file_path: str = doc["file_path"]
         filename: str = doc.get("filename", file_path)
 
@@ -317,6 +323,7 @@ def rescue_stalled_documents() -> dict:
 def run_full_scan(
     root_folder: str,
     progress_callback: Optional[callable] = None,
+    is_cancelled: Optional[callable] = None,
 ) -> dict:
     """
     Execute the complete DocuWise intelligence workflow for a folder.
@@ -335,6 +342,7 @@ def run_full_scan(
         progress_callback: Optional callable forwarded to
                            process_pending_documents(). Signature:
                                callback(current: int, total: int, filename: str)
+        is_cancelled:      Optional callable that returns True if the scan should stop.
 
     Returns:
         Combined summary dict:
@@ -381,6 +389,9 @@ def run_full_scan(
     else:
         logger.debug("STAGE 0 — No missing files detected.")
 
+    if is_cancelled and is_cancelled():
+        return {"cancelled": True}
+
     # ── Stage 1: Scan ────────────────────────────────────────────────────────
     logger.info("STAGE 1/3 — Scanning filesystem...")
     scan_result = scan_folder(root_folder)
@@ -393,6 +404,9 @@ def run_full_scan(
         scan_result["failed_files"],
     )
 
+    if is_cancelled and is_cancelled():
+        return {"cancelled": True}
+
     # ── Stage 2: Rescue stalled documents first ───────────────────────────────
     # Fixes docs whose status is inconsistent with their actual data.
     # Must run BEFORE process_pending so that re-queued docs are picked up
@@ -400,9 +414,18 @@ def run_full_scan(
     logger.info("STAGE 2a — Rescuing stalled documents...")
     rescue_result = rescue_stalled_documents()
 
+    if is_cancelled and is_cancelled():
+        return {"cancelled": True}
+
     # ── Stage 2b: Process pending + rescued documents ─────────────────────────
     logger.info("STAGE 2b — Processing pending documents...")
-    pipeline_result = process_pending_documents(progress_callback=progress_callback)
+    pipeline_result = process_pending_documents(
+        progress_callback=progress_callback,
+        is_cancelled=is_cancelled
+    )
+
+    if is_cancelled and is_cancelled():
+        return {"cancelled": True}
 
     # ── Stage 3: Detect duplicates ───────────────────────────────────────────
     logger.info("STAGE 3/3 — Detecting duplicates and similar documents...")

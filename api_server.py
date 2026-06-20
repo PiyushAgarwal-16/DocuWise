@@ -43,6 +43,7 @@ from core.pipeline import run_full_scan
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("api_server")
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 app = FastAPI(title="DocuWise API")
 
@@ -92,6 +93,7 @@ class SSELogHandler(logging.Handler):
 
 scan_event_queue: queue.Queue = queue.Queue(maxsize=1000)
 scan_in_progress = False
+cancel_scan_flag = False
 
 # ---------------------------------------------------------------------------
 # Models
@@ -348,9 +350,17 @@ def get_cleanup(folder: Optional[str] = None):
 # Scan Operations
 # ---------------------------------------------------------------------------
 
+@app.post("/api/scan/stop")
+def stop_scan():
+    global cancel_scan_flag
+    if scan_in_progress:
+        cancel_scan_flag = True
+        return {"status": "stopping"}
+    return {"status": "not_running"}
+
 @app.post("/api/scan")
 async def start_scan(req: ScanRequest):
-    global scan_in_progress
+    global scan_in_progress, cancel_scan_flag
     if scan_in_progress:
         raise HTTPException(status_code=400, detail="Scan already in progress")
     
@@ -358,6 +368,7 @@ async def start_scan(req: ScanRequest):
         raise HTTPException(status_code=400, detail="Folder does not exist")
         
     scan_in_progress = True
+    cancel_scan_flag = False
     
     # Clear queue
     while not scan_event_queue.empty():
@@ -389,8 +400,15 @@ async def start_scan(req: ScanRequest):
                 pass
 
         try:
-            result = run_full_scan(req.folder, progress_callback=progress_cb)
-            scan_event_queue.put_nowait({"type": "complete", "result": result})
+            result = run_full_scan(
+                req.folder, 
+                progress_callback=progress_cb,
+                is_cancelled=lambda: cancel_scan_flag
+            )
+            if cancel_scan_flag:
+                scan_event_queue.put_nowait({"type": "error", "error": "Scan stopped by user"})
+            else:
+                scan_event_queue.put_nowait({"type": "complete", "result": result})
         except Exception as e:
             scan_event_queue.put_nowait({"type": "error", "error": str(e)})
         finally:

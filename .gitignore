@@ -27,3 +27,10 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+
+# Frontend & Tauri
+frontend/node_modules/
+frontend/dist/
+frontend/src-tauri/target/
+frontend/src-tauri/gen/
+frontend/.eslintcache

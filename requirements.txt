@@ -9,3 +9,5 @@ send2trash
 numpy
 python-dotenv
 openai
+fastapi
+uvicorn

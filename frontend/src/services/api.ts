@@ -10,28 +10,35 @@ import {
 
 const API_BASE = "/api";
 
-async function fetcher<T>(endpoint: string, retries = 20, delayMs = 3000): Promise<T> {
+async function fetcher<T>(endpoint: string, retries = 40, delayMs = 1000): Promise<T> {
+  let lastError: unknown;
   for (let i = 0; i < retries; i++) {
     try {
       const res = await fetch(`${API_BASE}${endpoint}`);
-      if (!res.ok) {
-        if (res.status === 502 || res.status === 504 || res.status === 503) {
-           throw new Error(`API Error: ${res.status} Bad Gateway`);
-        }
-        throw new Error(`API Error: ${res.status} ${res.statusText}`);
+      if (res.ok) return await res.json();
+
+      // 4xx = genuine client error, fail immediately (no point retrying).
+      if (res.status < 500) {
+        const body = await res.text().catch(() => "");
+        throw new Error(`API Error ${res.status}: ${body || res.statusText}`);
       }
-      return await res.json();
+
+      // 5xx = backend not ready yet or proxy could not reach it
+      // (Vite returns 503 while the Python server is still booting). Retryable.
+      lastError = new Error(`API Error ${res.status} ${res.statusText}`);
     } catch (e: any) {
-      // If it's a proxy error (502) or network error, wait and retry
-      if (i < retries - 1 && (e.message.includes('Failed to fetch') || e.message.includes('Bad Gateway') || e.message.includes('504') || e.message.includes('503'))) {
-        console.log(`Backend warming up, retrying ${endpoint} in ${delayMs}ms...`);
-        await new Promise(r => setTimeout(r, delayMs));
-        continue;
-      }
-      throw e;
+      // A thrown 4xx above is non-retryable; surface it right away.
+      if (e instanceof Error && /^API Error 4/.test(e.message)) throw e;
+      // Otherwise it's a network failure (backend down / proxy reset) — retry.
+      lastError = e;
+    }
+
+    if (i < retries - 1) {
+      console.log(`Backend warming up, retrying ${endpoint} (${i + 1}/${retries})...`);
+      await new Promise(r => setTimeout(r, delayMs));
     }
   }
-  throw new Error(`Failed after ${retries} retries`);
+  throw lastError ?? new Error(`Failed to reach backend for ${endpoint}`);
 }
 
 function buildQuery(params: Record<string, string | undefined>): string {

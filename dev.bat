@@ -5,7 +5,20 @@ wmic process where "name='python.exe' and commandline like '%%api_server.py%%'" 
 echo Starting FastAPI server in the background...
 start "" /B venv\Scripts\python api_server.py
 
-timeout /t 2 /nobreak >nul
+echo Waiting for backend to be ready (loading AI models may take 10-20s)...
+set /a _tries=0
+:waitbackend
+set /a _tries+=1
+curl -s -f -o nul http://127.0.0.1:8765/api/health
+if not errorlevel 1 goto backendready
+if %_tries% geq 60 (
+    echo WARNING: Backend did not respond after 60s. Starting frontend anyway...
+    goto backendready
+)
+timeout /t 1 /nobreak >nul
+goto waitbackend
+:backendready
+echo Backend is ready.
 
 echo Starting Tauri Frontend...
 cd frontend

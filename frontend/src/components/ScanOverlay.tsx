@@ -3,7 +3,6 @@ import { Card } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { ScanProgressEvent } from "@/services/types";
 import { Zap, Terminal, XCircle } from "lucide-react";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { api } from "@/services/api";
 
@@ -21,7 +20,7 @@ export default function ScanOverlay({ onComplete }: ScanOverlayProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    let interval: NodeJS.Timeout;
+    let interval: ReturnType<typeof setInterval>;
     if (status === "processing") {
       interval = setInterval(() => {
         setElapsed((prev) => prev + 1);

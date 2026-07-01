@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "@/services/api";
 import { CleanupCandidate, MissingFile } from "@/services/types";
 import { invoke } from "@tauri-apps/api/core";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";

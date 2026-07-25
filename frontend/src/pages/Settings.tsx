@@ -52,6 +52,60 @@ export default function Settings() {
 
           <Card className="bg-panel border-border">
             <CardHeader>
+              <CardTitle>OCR Engine</CardTitle>
+              <CardDescription>Optical character recognition for scanned PDFs and images.</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div className="flex items-center gap-4">
+                <span className="text-sm font-medium w-32">Status:</span>
+                {config?.ocr_enabled ? (
+                  config?.ocr_available ? (
+                    <Badge className="bg-success/20 text-success uppercase">Enabled &amp; Ready</Badge>
+                  ) : (
+                    <Badge className="bg-warning/20 text-warning uppercase">Enabled (engine not installed)</Badge>
+                  )
+                ) : (
+                  <Badge variant="secondary" className="bg-surface uppercase">Disabled</Badge>
+                )}
+              </div>
+              <div className="flex items-center gap-4">
+                <span className="text-sm font-medium w-32">Engine:</span>
+                <Badge variant="outline" className="text-xs uppercase">
+                  {config?.ocr_engine || "—"} {config?.ocr_version ? `(${config.ocr_version})` : ""}
+                </Badge>
+              </div>
+              <div className="flex items-center gap-4">
+                <span className="text-sm font-medium w-32">Language:</span>
+                <Badge variant="outline" className="text-xs uppercase">{config?.ocr_language || "—"}</Badge>
+              </div>
+              {config?.ocr_enabled && !config?.ocr_available && (
+                <p className="text-xs text-muted-foreground pt-1">
+                  Install the OCR backend to enable scanned-document text recognition:
+                  <code className="ml-1 px-1.5 py-0.5 rounded bg-surface">pip install paddleocr paddlepaddle</code>
+                </p>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card className="bg-panel border-border">
+            <CardHeader>
+              <CardTitle>Content Cache</CardTitle>
+              <CardDescription>Reuses OCR, analysis, and embeddings across identical document content.</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="flex items-center gap-4">
+                <span className="text-sm font-medium w-32">Status:</span>
+                {config?.content_cache_enabled ? (
+                  <Badge className="bg-success/20 text-success uppercase">Enabled</Badge>
+                ) : (
+                  <Badge variant="secondary" className="bg-surface uppercase">Disabled</Badge>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="bg-panel border-border">
+            <CardHeader>
               <CardTitle>Taxonomy Categories</CardTitle>
               <CardDescription>Allowed categories for document classification.</CardDescription>
             </CardHeader>

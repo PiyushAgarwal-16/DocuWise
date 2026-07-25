@@ -15,6 +15,7 @@ export default function ScanOverlay({ onComplete }: ScanOverlayProps) {
   const [elapsed, setElapsed] = useState(0);
   const [currentFile, setCurrentFile] = useState<string>("");
   const [stage, setStage] = useState<string>("Initializing...");
+  const [page, setPage] = useState<number | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [status, setStatus] = useState<"processing" | "complete" | "error" | "stopping">("processing");
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -43,9 +44,12 @@ export default function ScanOverlay({ onComplete }: ScanOverlayProps) {
           });
           if (data.filename) setCurrentFile(data.filename.split(/[\\/]/).pop() || "");
           if (data.stage) setStage(data.stage);
-        } 
+          // A new file has started — reset the per-file page counter.
+          setPage(null);
+        }
         else if (data.type === "log") {
           if (data.stage) setStage(data.stage);
+          if (typeof data.page === "number") setPage(data.page);
           if (data.message) {
             setLogs(prev => [...prev.slice(-49), data.message!]);
           }
@@ -131,6 +135,9 @@ export default function ScanOverlay({ onComplete }: ScanOverlayProps) {
           <p className="text-muted-foreground text-sm font-medium">
             <span className="text-primary mr-2">{stage}</span>
             <span className="text-foreground">{currentFile}</span>
+            {page !== null && (
+              <span className="ml-2 text-xs text-muted-foreground/70">· page {page}</span>
+            )}
           </p>
         </div>
 

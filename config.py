@@ -201,12 +201,34 @@ SKIP_UNCHANGED_FILES: bool = True
 
 # File extensions that DocuWise will discover and process.
 # All comparisons are case-insensitive (handled in scanner.py).
+# Image formats are first-class documents (Phase 5) — routed through OCR.
 SUPPORTED_EXTENSIONS: list[str] = [
     ".pdf",
     ".docx",
     ".txt",
     ".pptx",
     ".xlsx",
+    # Image formats (OCR) — Phase 5
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".bmp",
+    ".tiff",
+    ".tif",
+    ".webp",
+]
+
+# Image extensions treated as first-class OCR documents. Kept as a dedicated
+# set so the extractor can dispatch images to the OCR path without hard-coding
+# the list in multiple modules. Must be a subset of SUPPORTED_EXTENSIONS.
+IMAGE_EXTENSIONS: list[str] = [
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".bmp",
+    ".tiff",
+    ".tif",
+    ".webp",
 ]
 
 # Filename substrings that identify junk or low-value files (case-insensitive).
@@ -310,30 +332,69 @@ FILENAME_HEURISTIC_CONFIDENCE: float = 0.65
 
 
 # =============================================================================
-# 9. OCR CONFIGURATION  (future support — not active in V1)
+# 9. OCR CONFIGURATION  (Phase 3–8 — PaddleOCR hybrid extraction)
 # =============================================================================
 
-# Master switch for OCR processing. Set to True once an OCR backend is integrated.
-# When False, files in OCR_EXTENSIONS are skipped entirely during extraction.
-OCR_ENABLED: bool = False
+# Master switch for OCR processing. When True, image files and image-based
+# (scanned) PDF pages are routed through the configured OCR engine.
+# If the OCR engine cannot be loaded (e.g. PaddleOCR not installed), the
+# pipeline degrades gracefully: scanned pages/images are marked 'image_only'
+# and native extraction continues unaffected — no crash, no regression.
+OCR_ENABLED: bool = True
 
-# File extensions that will be routed to the OCR pipeline when OCR_ENABLED = True.
-# These are image-based formats that cannot be read by standard text extractors.
-OCR_EXTENSIONS: list[str] = [
-    ".png",
-    ".jpg",
-    ".jpeg",
-    ".tiff",
-    ".bmp",
-]
+# OCR engine identifier. Resolved by core.ocr.get_ocr_engine().
+# Supported values: "paddleocr". Tesseract is explicitly NOT used (Phase 3).
+OCR_ENGINE: str = "paddleocr"
 
-# OCR engine to use when OCR_ENABLED = True.
-# Supported future values: "tesseract" | "easyocr" | "gemini_vision"
-OCR_ENGINE: str = "tesseract"
+# Human-readable OCR engine version tag, persisted alongside every OCR result
+# so future model upgrades can be detected and cache entries invalidated.
+OCR_VERSION: str = "paddleocr-2.7"
 
-# Minimum OCR confidence score (0–100 for Tesseract) below which extracted
-# text is discarded as unreliable.
-OCR_MIN_CONFIDENCE: int = 60
+# OCR recognition language passed to the engine (PaddleOCR `lang` argument).
+# "en" = English. Use "ch" for Chinese+English, "latin" for Latin scripts, etc.
+OCR_LANGUAGE: str = "en"
+
+# Minimum number of native-text characters a PDF page must contain to be
+# considered "already has text". Pages below this threshold are sent to OCR.
+# This is what makes extraction HYBRID — only text-poor pages are OCR'd.
+OCR_MIN_TEXT_THRESHOLD: int = 20
+
+# Minimum mean OCR confidence (0.0–1.0) for a page's recognised text to be
+# accepted. Pages/documents below this are treated as low-confidence but the
+# text is still retained (confidence is surfaced in the UI, not discarded).
+OCR_MIN_CONFIDENCE: float = 0.50
+
+# When True, OCR text (and full extraction results) are cached by MD5 so
+# identical content is never OCR'd twice. Part of the Content Cache layer.
+OCR_CACHE_ENABLED: bool = True
+
+# Soft wall-clock budget (seconds) for OCR of a single document. Once exceeded,
+# remaining pages are skipped and whatever text was recognised so far is kept.
+# Prevents a pathological file from stalling the whole scan.
+OCR_TIMEOUT_SECONDS: float = 120.0
+
+# Longest edge (pixels) an image is downscaled to before OCR. Larger images are
+# resized down preserving aspect ratio — bounds memory use and inference time.
+OCR_MAX_IMAGE_SIZE: int = 2600
+
+# Maximum number of pages of a single PDF that will be OCR'd. Pages beyond this
+# cap are skipped (counted as skipped) to bound processing time on huge files.
+OCR_MAX_PDF_PAGES: int = 50
+
+# DPI used when rendering a PDF page to a raster image for OCR. 200 DPI is a
+# good accuracy/speed trade-off for typical scanned documents.
+OCR_RENDER_DPI: int = 200
+
+
+# =============================================================================
+# 9b. CONTENT CACHE CONFIGURATION  (Phase 2 — reusable content cache)
+# =============================================================================
+
+# Master switch for the reusable Content Cache (content_cache table).
+# When True, every expensive operation (OCR, NVIDIA analysis, embedding
+# generation) happens at most once per unique document content (MD5).
+# Moved / copied / duplicate files reuse the cached results instantly.
+CONTENT_CACHE_ENABLED: bool = True
 
 
 # =============================================================================

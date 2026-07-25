@@ -191,6 +191,46 @@ def init_db() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_rate_limit_provider_ts
                 ON rate_limit_log (provider, timestamp);
+
+            -- ----------------------------------------------------------------
+            -- content_cache: reusable per-content cache keyed by MD5 (Phase 2)
+            --
+            -- Every expensive operation (OCR, NVIDIA analysis, embedding
+            -- generation) is stored here exactly once per unique document
+            -- content. Moved / copied / duplicate files reuse these results
+            -- without re-running any expensive stage.
+            -- ----------------------------------------------------------------
+            CREATE TABLE IF NOT EXISTS content_cache (
+                md5_hash                TEXT PRIMARY KEY,
+
+                -- Extracted text layers
+                native_text             TEXT,   -- text from PyMuPDF / python-docx / plain read
+                ocr_text                TEXT,   -- text recovered via OCR (may be NULL)
+                final_text              TEXT,   -- merged text actually used downstream
+                extraction_method       TEXT,   -- native | hybrid | ocr_only | image_only
+
+                -- Embedding (JSON array of floats)
+                embedding_json          TEXT,
+
+                -- LLM analysis results
+                summary                 TEXT,
+                category                TEXT,
+                subject                 TEXT,
+                tags_json               TEXT,
+                importance_score        REAL,
+                analysis_source         TEXT,   -- nvidia | gemini | fallback | cached
+
+                -- OCR provenance / metrics
+                ocr_engine              TEXT,
+                ocr_version             TEXT,
+                ocr_confidence          REAL,
+                ocr_processing_time_ms  INTEGER,
+                ocr_pages_processed     INTEGER,
+
+                -- Audit timestamps
+                created_at              TEXT NOT NULL,
+                updated_at              TEXT NOT NULL
+            );
         """)
 
     # ── Column migrations (idempotent ALTER TABLE) ──────────────────────────
@@ -201,6 +241,24 @@ def init_db() -> None:
         column="analysis_source",
         definition="TEXT DEFAULT NULL",
     )
+
+    # ── Extraction metadata (Phase 6) ───────────────────────────────────────
+    # These columns describe HOW a document's text was obtained and, when OCR
+    # was involved, its provenance and cost. All nullable so pre-existing rows
+    # migrate cleanly (a NULL extraction_method is treated as 'native' by the
+    # dashboard aggregates below).
+    _extraction_columns: dict[str, str] = {
+        "extraction_method":      "TEXT DEFAULT NULL",   # native|hybrid|ocr_only|image_only
+        "ocr_engine":             "TEXT DEFAULT NULL",
+        "ocr_version":            "TEXT DEFAULT NULL",
+        "ocr_confidence":         "REAL DEFAULT NULL",
+        "ocr_pages_processed":    "INTEGER DEFAULT 0",
+        "ocr_pages_skipped":      "INTEGER DEFAULT 0",
+        "ocr_processing_time_ms": "INTEGER DEFAULT 0",
+        "ocr_cached":             "INTEGER DEFAULT 0",    # 1 when OCR text came from cache
+    }
+    for _col, _defn in _extraction_columns.items():
+        _add_column_if_missing(table="documents", column=_col, definition=_defn)
 
 
 def _add_column_if_missing(table: str, column: str, definition: str) -> None:
@@ -274,17 +332,36 @@ def update_document_extraction(
     word_count: int,
     md5_hash: str,
     extracted_text: str,
+    extraction_method: Optional[str] = None,
+    ocr_engine: Optional[str] = None,
+    ocr_version: Optional[str] = None,
+    ocr_confidence: Optional[float] = None,
+    ocr_pages_processed: int = 0,
+    ocr_pages_skipped: int = 0,
+    ocr_processing_time_ms: int = 0,
+    ocr_cached: int = 0,
 ) -> None:
     """
-    Persist text extraction results and advance status to 'extracted'.
+    Persist text extraction results (and optional OCR metadata) and advance
+    status to 'extracted'.
 
     Called by extractor.py after successfully reading a document's content.
+    The OCR-related parameters are optional so callers that do not use OCR
+    (DOCX / TXT / native PDF) can invoke this exactly as before.
 
     Args:
-        file_path:      Absolute path identifying the target document row.
-        word_count:     Number of whitespace-delimited words in the extracted text.
-        md5_hash:       MD5 hex-digest of the raw file bytes for duplicate detection.
-        extracted_text: Full plain-text content extracted from the document.
+        file_path:              Absolute path identifying the target document row.
+        word_count:             Whitespace-delimited word count of the final text.
+        md5_hash:               MD5 hex-digest of the raw file bytes.
+        extracted_text:         Final plain-text content used downstream.
+        extraction_method:      native | hybrid | ocr_only | image_only (Phase 6).
+        ocr_engine:             OCR engine name, or None if OCR was not used.
+        ocr_version:            OCR engine version tag, or None.
+        ocr_confidence:         Mean OCR confidence 0.0–1.0, or None.
+        ocr_pages_processed:    Number of pages actually OCR'd.
+        ocr_pages_skipped:      Number of pages that already had native text.
+        ocr_processing_time_ms: Total OCR wall-clock time in milliseconds.
+        ocr_cached:             1 if the OCR text was reused from the cache.
     """
     now = _now()
     conn = _connect()
@@ -292,15 +369,29 @@ def update_document_extraction(
         conn.execute(
             """
             UPDATE documents
-               SET word_count         = ?,
-                   md5_hash           = ?,
-                   extracted_text     = ?,
-                   processing_status  = 'extracted',
-                   last_scanned_at    = ?,
-                   updated_at         = ?
+               SET word_count             = ?,
+                   md5_hash               = ?,
+                   extracted_text         = ?,
+                   extraction_method      = ?,
+                   ocr_engine             = ?,
+                   ocr_version            = ?,
+                   ocr_confidence         = ?,
+                   ocr_pages_processed    = ?,
+                   ocr_pages_skipped      = ?,
+                   ocr_processing_time_ms = ?,
+                   ocr_cached             = ?,
+                   processing_status      = 'extracted',
+                   last_scanned_at        = ?,
+                   updated_at             = ?
              WHERE file_path = ?
             """,
-            (word_count, md5_hash, extracted_text, now, now, file_path),
+            (
+                word_count, md5_hash, extracted_text,
+                extraction_method, ocr_engine, ocr_version, ocr_confidence,
+                ocr_pages_processed, ocr_pages_skipped, ocr_processing_time_ms,
+                ocr_cached,
+                now, now, file_path,
+            ),
         )
 
 
@@ -550,6 +641,192 @@ def copy_analysis_from_cache(
         )
 
 
+def get_document(file_path: str) -> Optional[dict]:
+    """
+    Return a single document row as a dict, or None if not found.
+
+    Public accessor used by the content-cache service and any caller that needs
+    the full row without embedding a raw SELECT.
+
+    Args:
+        file_path: Absolute path used as the unique document key.
+
+    Returns:
+        Document dict (all columns) or None.
+    """
+    conn = _connect()
+    with conn:
+        row = conn.execute(
+            "SELECT * FROM documents WHERE file_path = ? LIMIT 1",
+            (file_path,),
+        ).fetchone()
+    return _row_to_dict(row)
+
+
+# ---------------------------------------------------------------------------
+# content_cache — reusable per-content cache (Phase 2)
+# ---------------------------------------------------------------------------
+
+# Whitelist of writable content_cache columns. Guards content_cache_upsert()
+# against SQL injection via dynamic column names and documents the schema.
+_CONTENT_CACHE_COLUMNS: frozenset[str] = frozenset({
+    "native_text", "ocr_text", "final_text", "extraction_method",
+    "embedding_json", "summary", "category", "subject", "tags_json",
+    "importance_score", "analysis_source",
+    "ocr_engine", "ocr_version", "ocr_confidence",
+    "ocr_processing_time_ms", "ocr_pages_processed",
+})
+
+
+def content_cache_get(md5_hash: str) -> Optional[dict]:
+    """
+    Return the content_cache row for *md5_hash*, or None on a cache miss.
+
+    Args:
+        md5_hash: MD5 hex-digest identifying the unique document content.
+
+    Returns:
+        Cache row dict (all columns) or None.
+    """
+    if not md5_hash:
+        return None
+    conn = _connect()
+    with conn:
+        row = conn.execute(
+            "SELECT * FROM content_cache WHERE md5_hash = ? LIMIT 1",
+            (md5_hash,),
+        ).fetchone()
+    return _row_to_dict(row)
+
+
+def content_cache_upsert(md5_hash: str, **fields) -> None:
+    """
+    Insert or update a content_cache row, writing only the provided columns.
+
+    Existing columns not present in *fields* are preserved on update — this lets
+    the extractor seed the text layers first and the pipeline fill in the
+    embedding + analysis later without clobbering earlier data.
+
+    Args:
+        md5_hash: Primary key (MD5 hex-digest). Required and non-empty.
+        **fields: Any subset of _CONTENT_CACHE_COLUMNS to write.
+
+    Raises:
+        ValueError: If md5_hash is empty or an unknown column is supplied.
+    """
+    if not md5_hash:
+        raise ValueError("content_cache_upsert requires a non-empty md5_hash.")
+
+    unknown = set(fields) - _CONTENT_CACHE_COLUMNS
+    if unknown:
+        raise ValueError(f"Unknown content_cache column(s): {sorted(unknown)}")
+
+    now = _now()
+    # Write every provided column. On UPDATE, COALESCE(new, existing) below means
+    # a None value never erases previously stored data — so partial upserts
+    # (text first, embedding + analysis later) compose safely.
+    columns = list(fields.keys())
+
+    conn = _connect()
+    with conn:
+        insert_cols = ["md5_hash"] + columns + ["created_at", "updated_at"]
+        placeholders = ", ".join("?" for _ in insert_cols)
+        values = [md5_hash] + [fields[c] for c in columns] + [now, now]
+
+        # On conflict, update each provided column. Use COALESCE(new, existing)
+        # so a None in *fields* never erases a previously stored value.
+        update_clause = ", ".join(
+            f"{c} = COALESCE(excluded.{c}, content_cache.{c})" for c in columns
+        )
+        update_clause = (update_clause + ", " if update_clause else "") + "updated_at = excluded.updated_at"
+
+        conn.execute(
+            f"""
+            INSERT INTO content_cache ({", ".join(insert_cols)})
+            VALUES ({placeholders})
+            ON CONFLICT(md5_hash) DO UPDATE SET {update_clause}
+            """,
+            values,
+        )
+
+
+def restore_document_from_cache(file_path: str, entry: dict) -> None:
+    """
+    Write a full content_cache entry into a document row and mark it 'embedded'.
+
+    This is the read-side of the Content Cache: called when a file's MD5 already
+    has a complete cache entry (moved / copied / duplicate content). It restores
+    the final text, embedding, analysis, and extraction/OCR metadata in a single
+    UPDATE so no expensive stage re-runs.
+
+    Args:
+        file_path: Absolute path of the document being fast-tracked.
+        entry:     A content_cache row dict (from content_cache_get) — or any
+                   dict exposing the same keys (used by the documents-MD5
+                   backward-compatibility fallback).
+    """
+    now = _now()
+    final_text = entry.get("final_text") or entry.get("extracted_text") or ""
+    word_count = len(final_text.split()) if final_text else 0
+    # Only count this as an OCR-cache reuse if the cached content actually
+    # involved OCR — a restored native/DOCX/TXT document did not.
+    ocr_cached = 1 if (entry.get("ocr_pages_processed") or entry.get("ocr_text")) else 0
+
+    conn = _connect()
+    with conn:
+        conn.execute(
+            """
+            UPDATE documents
+               SET word_count             = ?,
+                   extracted_text         = ?,
+                   embedding_json         = ?,
+                   summary                = ?,
+                   category               = ?,
+                   subject                = ?,
+                   tags_json              = ?,
+                   importance_score       = ?,
+                   deletion_candidate     = ?,
+                   deletion_reason        = ?,
+                   highlight              = ?,
+                   highlight_reason       = ?,
+                   analysis_source        = 'cached',
+                   extraction_method      = ?,
+                   ocr_engine             = ?,
+                   ocr_version            = ?,
+                   ocr_confidence         = ?,
+                   ocr_pages_processed    = ?,
+                   ocr_processing_time_ms = ?,
+                   ocr_cached             = ?,
+                   processing_status      = 'embedded',
+                   last_scanned_at        = ?,
+                   updated_at             = ?
+             WHERE file_path = ?
+            """,
+            (
+                word_count,
+                final_text,
+                entry.get("embedding_json"),
+                entry.get("summary"),
+                entry.get("category"),
+                entry.get("subject"),
+                entry.get("tags_json"),
+                entry.get("importance_score"),
+                entry.get("deletion_candidate", 0) or 0,
+                entry.get("deletion_reason"),
+                entry.get("highlight", 0) or 0,
+                entry.get("highlight_reason"),
+                entry.get("extraction_method"),
+                entry.get("ocr_engine"),
+                entry.get("ocr_version"),
+                entry.get("ocr_confidence"),
+                entry.get("ocr_pages_processed", 0) or 0,
+                entry.get("ocr_processing_time_ms", 0) or 0,
+                ocr_cached,
+                now, now, file_path,
+            ),
+        )
+
+
 def get_all_documents() -> list[dict]:
     """
     Return every document row ordered alphabetically by filename.
@@ -587,6 +864,32 @@ def get_documents_by_status(status: str) -> list[dict]:
         rows = conn.execute(
             "SELECT * FROM documents WHERE processing_status = ? ORDER BY filename COLLATE NOCASE",
             (status,),
+        ).fetchall()
+    return _rows_to_dicts(rows)
+
+
+def get_documents_for_ocr_retry() -> list[dict]:
+    """
+    Return image-only documents that predate OCR and are worth re-attempting.
+
+    These are rows with processing_status = 'image_only' whose extraction_method
+    is still NULL — i.e. they were marked image-only before OCR existed and have
+    never been through an OCR attempt. Once OCR runs (success or a definitive
+    'image_only' verdict), extraction_method is set, so a document is retried at
+    most once and never loops across scans.
+
+    Returns:
+        List of document dicts eligible for a one-time OCR retry.
+    """
+    conn = _connect()
+    with conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM documents
+             WHERE processing_status = 'image_only'
+               AND extraction_method IS NULL
+             ORDER BY filename COLLATE NOCASE
+            """
         ).fetchall()
     return _rows_to_dicts(rows)
 
@@ -976,3 +1279,100 @@ def get_total_duplicates() -> int:
             "SELECT COUNT(*) FROM document_relationships"
         ).fetchone()
     return row[0] if row else 0
+
+
+# ---------------------------------------------------------------------------
+# Extraction / OCR / cache dashboard metrics (Phase 10)
+# ---------------------------------------------------------------------------
+
+def get_extraction_metrics(path_prefix: Optional[str] = None) -> dict:
+    """
+    Aggregate extraction-method and OCR/cache metrics for the dashboard.
+
+    Rows predating the OCR feature have a NULL extraction_method; they are
+    bucketed by processing_status so the numbers stay meaningful after upgrade:
+    a NULL method with status 'image_only' counts as an image-only document,
+    everything else with usable text counts as 'native'.
+
+    Args:
+        path_prefix: Optional folder filter. When given, only documents whose
+                     file_path starts with this prefix are counted.
+
+    Returns:
+        {
+            "native_documents":   int,
+            "hybrid_documents":   int,
+            "ocr_only_documents": int,
+            "image_only_documents": int,
+            "ocr_cache_hits":     int,   # docs whose OCR text came from cache
+            "content_cache_hits": int,   # docs restored wholesale from cache
+            "api_calls_saved":    int,   # NVIDIA calls avoided via cache
+            "embeddings_reused":  int,   # embeddings reused via cache
+            "avg_ocr_time_ms":    float, # mean OCR time over OCR'd documents
+        }
+    """
+    where = ""
+    params: list = []
+    if path_prefix:
+        where = " WHERE file_path LIKE ?"
+        params.append(path_prefix.rstrip("\\/") + "\\" + "%")
+
+    conn = _connect()
+    with conn:
+        rows = conn.execute(
+            f"""
+            SELECT extraction_method, processing_status,
+                   ocr_cached, analysis_source,
+                   ocr_processing_time_ms, ocr_pages_processed
+            FROM documents{where}
+            """,
+            params,
+        ).fetchall()
+
+    metrics = {
+        "native_documents": 0,
+        "hybrid_documents": 0,
+        "ocr_only_documents": 0,
+        "image_only_documents": 0,
+        "ocr_cache_hits": 0,
+        "content_cache_hits": 0,
+        "api_calls_saved": 0,
+        "embeddings_reused": 0,
+        "avg_ocr_time_ms": 0.0,
+    }
+
+    ocr_times: list[int] = []
+    for row in rows:
+        method = row["extraction_method"]
+        status = row["processing_status"]
+
+        # Backward-compatible bucketing for pre-OCR rows.
+        if method is None:
+            method = "image_only" if status == "image_only" else "native"
+
+        if method == "native":
+            metrics["native_documents"] += 1
+        elif method == "hybrid":
+            metrics["hybrid_documents"] += 1
+        elif method == "ocr_only":
+            metrics["ocr_only_documents"] += 1
+        elif method == "image_only":
+            metrics["image_only_documents"] += 1
+
+        if row["ocr_cached"]:
+            metrics["ocr_cache_hits"] += 1
+
+        if row["analysis_source"] == "cached":
+            metrics["content_cache_hits"] += 1
+            metrics["api_calls_saved"] += 1
+            metrics["embeddings_reused"] += 1
+
+        t = row["ocr_processing_time_ms"] or 0
+        pages = row["ocr_pages_processed"] or 0
+        if pages > 0 and t > 0:
+            ocr_times.append(t)
+
+    if ocr_times:
+        metrics["avg_ocr_time_ms"] = round(sum(ocr_times) / len(ocr_times), 1)
+
+    return metrics

@@ -144,7 +144,38 @@ export default function Documents({ folder }: { folder?: string }) {
                 <DetailRow label="Importance" value={selected.importance_score?.toString()} />
                 <DetailRow label="File Size" value={selected.file_size_kb ? `${selected.file_size_kb} KB` : undefined} />
                 <DetailRow label="Word Count" value={selected.word_count?.toString()} />
-                
+
+                {/* Phase 6 — extraction & OCR metadata */}
+                <div className="grid grid-cols-2 gap-4 pt-2 border-t border-border/50">
+                  <div className="flex flex-col gap-1.5">
+                    <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">Extraction</span>
+                    <ExtractionBadge method={selected.extraction_method} />
+                  </div>
+                  <DetailRow label="Analysis Source" value={formatSource(selected.analysis_source)} />
+                  {selected.ocr_engine && (
+                    <DetailRow label="OCR Engine" value={`${selected.ocr_engine} ${selected.ocr_version || ""}`.trim()} />
+                  )}
+                  {selected.ocr_confidence != null && (
+                    <DetailRow label="OCR Confidence" value={`${Math.round((selected.ocr_confidence || 0) * 100)}%`} />
+                  )}
+                  {(selected.ocr_pages_processed ?? 0) > 0 && (
+                    <DetailRow label="Pages OCR'd" value={`${selected.ocr_pages_processed}`} />
+                  )}
+                  {(selected.ocr_processing_time_ms ?? 0) > 0 && (
+                    <DetailRow label="OCR Time" value={`${((selected.ocr_processing_time_ms || 0) / 1000).toFixed(1)}s`} />
+                  )}
+                  <div className="flex flex-col gap-1.5">
+                    <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">Cache</span>
+                    {selected.analysis_source === "cached" ? (
+                      <Badge className="bg-emerald-500/20 text-emerald-400 border-emerald-500/30 w-fit">Cache Hit</Badge>
+                    ) : selected.ocr_cached ? (
+                      <Badge className="bg-cyan-500/20 text-cyan-400 border-cyan-500/30 w-fit">OCR Reused</Badge>
+                    ) : (
+                      <Badge variant="secondary" className="bg-surface w-fit">Freshly Processed</Badge>
+                    )}
+                  </div>
+                </div>
+
                 <div className="space-y-1.5">
                   <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Summary</span>
                   <p className="text-sm text-foreground leading-relaxed">
@@ -179,10 +210,38 @@ export default function Documents({ folder }: { folder?: string }) {
 
 function StatusBadge({ status }: { status: string }) {
   if (status === "embedded") return <Badge className="bg-success hover:bg-success/90">Fully Processed</Badge>;
-  if (status === "image_only") return <Badge variant="secondary" className="bg-purple-500/20 text-purple-400 hover:bg-purple-500/30 border-purple-500/30">Image PDF</Badge>;
+  if (status === "image_only") return <Badge variant="secondary" className="bg-purple-500/20 text-purple-400 hover:bg-purple-500/30 border-purple-500/30">Image Only</Badge>;
   if (status === "failed") return <Badge variant="destructive">Failed</Badge>;
   if (status === "missing") return <Badge variant="outline" className="text-muted-foreground border-muted-foreground/30">Missing</Badge>;
   return <Badge variant="secondary" className="bg-surface">{status}</Badge>;
+}
+
+function ExtractionBadge({ method }: { method?: string | null }) {
+  const m = method || "native";
+  const map: Record<string, string> = {
+    native: "bg-blue-500/20 text-blue-400 border-blue-500/30",
+    hybrid: "bg-teal-500/20 text-teal-400 border-teal-500/30",
+    ocr_only: "bg-indigo-500/20 text-indigo-400 border-indigo-500/30",
+    image_only: "bg-purple-500/20 text-purple-400 border-purple-500/30",
+  };
+  const label: Record<string, string> = {
+    native: "Native",
+    hybrid: "Hybrid OCR",
+    ocr_only: "OCR Only",
+    image_only: "Image Only",
+  };
+  return <Badge className={`${map[m] || map.native} w-fit`}>{label[m] || m}</Badge>;
+}
+
+function formatSource(src?: string | null): string | undefined {
+  if (!src) return undefined;
+  const map: Record<string, string> = {
+    nvidia: "NVIDIA",
+    gemini: "Gemini",
+    fallback: "Heuristic",
+    cached: "Content Cache",
+  };
+  return map[src] || src;
 }
 
 function DetailRow({ label, value }: { label: string; value?: string | null }) {

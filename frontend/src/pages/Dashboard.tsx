@@ -2,7 +2,10 @@ import { useEffect, useState } from "react";
 import { api } from "@/services/api";
 import { DashboardStats } from "@/services/types";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Files, CheckCircle2, Copy, Image as ImageIcon, Trash2, AlertTriangle } from "lucide-react";
+import {
+  Files, CheckCircle2, Copy, Image as ImageIcon, Trash2, AlertTriangle,
+  FileText, Layers, ScanText, Database, Zap, Cpu, Timer, Repeat,
+} from "lucide-react";
 
 export default function Dashboard({ folder }: { folder?: string }) {
   const [stats, setStats] = useState<DashboardStats | null>(null);
@@ -53,9 +56,36 @@ export default function Dashboard({ folder }: { folder?: string }) {
         <StatCard title="Total Docs" value={stats.total_documents} icon={Files} color="text-blue-500" />
         <StatCard title="Fully Processed" value={stats.embedded} icon={CheckCircle2} color="text-success" />
         <StatCard title="Duplicates" value={stats.duplicates} icon={Copy} color="text-warning" />
-        <StatCard title="Image PDFs" value={stats.image_only} icon={ImageIcon} color="text-purple-500" />
+        <StatCard title="Image Only" value={stats.image_only} icon={ImageIcon} color="text-purple-500" />
         <StatCard title="Cleanup" value={stats.cleanup_candidates} icon={Trash2} color="text-destructive" />
         <StatCard title="Failed" value={stats.failed} icon={AlertTriangle} color="text-orange-500" />
+      </div>
+
+      {/* Phase 10 — Extraction methods */}
+      <div>
+        <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider mb-3">
+          Extraction Methods
+        </h2>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <StatCard title="Native" value={stats.native_documents ?? 0} icon={FileText} color="text-blue-500" />
+          <StatCard title="Hybrid OCR" value={stats.hybrid_documents ?? 0} icon={Layers} color="text-teal-500" />
+          <StatCard title="OCR Only" value={stats.ocr_only_documents ?? 0} icon={ScanText} color="text-indigo-500" />
+          <StatCard title="Image Only" value={stats.image_only_documents ?? stats.image_only} icon={ImageIcon} color="text-purple-500" />
+        </div>
+      </div>
+
+      {/* Phase 10 — Cache & efficiency intelligence */}
+      <div>
+        <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider mb-3">
+          Cache & Efficiency
+        </h2>
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+          <StatCard title="Content Cache Hits" value={stats.content_cache_hits ?? 0} icon={Database} color="text-emerald-500" />
+          <StatCard title="OCR Cache Hits" value={stats.ocr_cache_hits ?? 0} icon={Repeat} color="text-cyan-500" />
+          <StatCard title="API Calls Saved" value={stats.api_calls_saved ?? 0} icon={Zap} color="text-yellow-500" />
+          <StatCard title="Embeddings Reused" value={stats.embeddings_reused ?? 0} icon={Cpu} color="text-fuchsia-500" />
+          <StatCard title="Avg OCR Time" value={formatMs(stats.avg_ocr_time_ms)} icon={Timer} color="text-orange-400" />
+        </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
@@ -110,6 +140,12 @@ export default function Dashboard({ folder }: { folder?: string }) {
       </div>
     </div>
   );
+}
+
+function formatMs(ms?: number): string {
+  if (!ms || ms <= 0) return "—";
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
 }
 
 function StatCard({ title, value, icon: Icon, color }: any) {

@@ -24,7 +24,7 @@ const navItems = [
   { name: "Dashboard", path: "/dashboard", icon: LayoutDashboard },
   { name: "Documents", path: "/documents", icon: Files },
   { name: "Duplicates", path: "/duplicates", icon: Copy },
-  { name: "Image PDFs", path: "/image-pdfs", icon: ImageIcon },
+  { name: "Image Only", path: "/image-pdfs", icon: ImageIcon },
   { name: "Cleanup", path: "/cleanup", icon: Trash2 },
 ];
 

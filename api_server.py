@@ -9,6 +9,7 @@ import asyncio
 import logging
 import os
 import queue
+import re
 import threading
 import time
 from typing import AsyncGenerator, Dict, List, Optional
@@ -22,13 +23,19 @@ from pydantic import BaseModel
 from config import (
     DEFAULT_CATEGORIES,
     LLM_PROVIDER,
+    OCR_ENABLED,
+    OCR_ENGINE,
+    OCR_LANGUAGE,
+    OCR_VERSION,
     SUPPORTED_EXTENSIONS,
+    CONTENT_CACHE_ENABLED,
 )
 from core.database import (
     _connect,
     get_all_documents,
     get_deletion_candidates,
     get_documents_by_status,
+    get_extraction_metrics,
     get_missing_documents,
     get_relationships,
     get_total_documents,
@@ -65,6 +72,42 @@ def startup_event():
 # ---------------------------------------------------------------------------
 # We use a custom logging handler to capture granular pipeline steps without
 # modifying pipeline.py.
+# Maps structured log event tokens (and legacy phrases) to the Phase 11
+# live-scan stage names shown in the ScanOverlay. Order matters — the first
+# matching token wins, so more specific events are listed before generic ones.
+_STAGE_RULES = [
+    ("OCR_STARTED", "OCR"),
+    ("OCR_PAGE_COMPLETED", "OCR"),
+    ("OCR_PAGE_SKIPPED", "OCR"),
+    ("OCR_COMPLETED", "OCR"),
+    ("OCR_FAILED", "OCR"),
+    ("CONTENT_CACHE_HIT", "Cache Hit"),
+    ("NVIDIA_SKIPPED_CACHE", "Cache Hit"),
+    ("EMBEDDING_SKIPPED_CACHE", "Cache Hit"),
+    ("CONTENT_CACHE_MISS", "Content Cache Lookup"),
+    ("Detecting duplicates", "Duplicate Detection"),
+    ("duplicate detection", "Duplicate Detection"),
+    ("Analyzing", "Analyzing"),
+    ("Analyzed", "Analyzing"),
+    ("Embedding", "Embedding"),
+    ("Embedded", "Embedding"),
+    ("Scanning", "Scanning"),
+    ("STAGE 1", "Scanning"),
+    ("Extracted", "Native Extraction"),
+    ("Extract", "Native Extraction"),
+    ("Processing:", "Native Extraction"),
+    ("Completed", "Saving"),
+]
+
+
+def _infer_stage(msg: str) -> str:
+    """Map a log line to a live-scan stage name (Phase 11)."""
+    for token, stage in _STAGE_RULES:
+        if token in msg:
+            return stage
+    return "Processing"
+
+
 class SSELogHandler(logging.Handler):
     def __init__(self, q: queue.Queue):
         super().__init__()
@@ -72,22 +115,23 @@ class SSELogHandler(logging.Handler):
 
     def emit(self, record):
         msg = self.format(record)
-        # Try to infer stage from log messages
-        stage = "Processing"
-        if "Extract" in msg or "process_document" in msg:
-            stage = "Extracting Text"
-        elif "Analyze" in msg or "analyze_document" in msg:
-            stage = "AI Analysis"
-        elif "Embed" in msg or "embed_document" in msg:
-            stage = "Indexing"
-        elif "CACHE HIT" in msg:
-            stage = "Cache Hit"
-        elif "Duplicate" in msg or "detect_duplicates" in msg:
-            stage = "Detecting Duplicates"
-        
-        # Put raw log into queue for SSE
+        stage = _infer_stage(msg)
+
+        # Parse a page number from structured OCR events (e.g. "page=3").
+        page = None
+        m = re.search(r"\bpage=(\d+)", msg)
+        if m:
+            try:
+                page = int(m.group(1))
+            except ValueError:
+                page = None
+
+        event = {"type": "log", "message": msg, "stage": stage}
+        if page is not None:
+            event["page"] = page
+
         try:
-            self.q.put_nowait({"type": "log", "message": msg, "stage": stage})
+            self.q.put_nowait(event)
         except queue.Full:
             pass
 
@@ -111,10 +155,25 @@ def health_check():
 
 @app.get("/api/config")
 def get_config():
+    # Report whether the OCR backend actually loaded (PaddleOCR installed), so
+    # the UI can distinguish "OCR configured" from "OCR usable".
+    ocr_available = False
+    if OCR_ENABLED:
+        try:
+            from core.ocr import get_ocr_engine
+            ocr_available = get_ocr_engine().is_available()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"OCR availability check failed: {e}")
     return {
         "supported_extensions": SUPPORTED_EXTENSIONS,
         "categories": DEFAULT_CATEGORIES,
-        "llm_provider": LLM_PROVIDER
+        "llm_provider": LLM_PROVIDER,
+        "ocr_enabled": OCR_ENABLED,
+        "ocr_engine": OCR_ENGINE,
+        "ocr_version": OCR_VERSION,
+        "ocr_language": OCR_LANGUAGE,
+        "ocr_available": ocr_available,
+        "content_cache_enabled": CONTENT_CACHE_ENABLED,
     }
 
 def _like(folder: Optional[str]) -> Optional[str]:
@@ -170,7 +229,10 @@ def get_stats(folder: Optional[str] = None):
                 WHERE importance_score IS NOT NULL
                 ORDER BY importance_score DESC LIMIT 8""").fetchall()
         conn.close()
-        
+
+        # Extraction-method breakdown + OCR/cache metrics (Phase 10).
+        extraction = get_extraction_metrics(folder)
+
         return {
             "total_documents": totals[0] or 0,
             "embedded": totals[1] or 0,
@@ -180,7 +242,17 @@ def get_stats(folder: Optional[str] = None):
             "failed": totals[5] or 0,
             "duplicates": dups[0] or 0,
             "categories": [dict(c) for c in cats],
-            "top_documents": [dict(t) for t in top]
+            "top_documents": [dict(t) for t in top],
+            # Phase 10 — extraction & cache intelligence
+            "native_documents": extraction["native_documents"],
+            "hybrid_documents": extraction["hybrid_documents"],
+            "ocr_only_documents": extraction["ocr_only_documents"],
+            "image_only_documents": extraction["image_only_documents"],
+            "ocr_cache_hits": extraction["ocr_cache_hits"],
+            "content_cache_hits": extraction["content_cache_hits"],
+            "api_calls_saved": extraction["api_calls_saved"],
+            "embeddings_reused": extraction["embeddings_reused"],
+            "avg_ocr_time_ms": extraction["avg_ocr_time_ms"],
         }
     except Exception as e:
         logger.error(f"Failed to get stats: {e}")

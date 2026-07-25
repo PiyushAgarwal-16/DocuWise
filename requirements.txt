@@ -11,3 +11,9 @@ python-dotenv
 openai
 fastapi
 uvicorn
+# OCR (Phase 3) — PaddleOCR hybrid extraction. Pillow is used to convert
+# rendered PDF pages / images before recognition. If these are not installed
+# the app still runs: OCR degrades gracefully and scanned docs stay image_only.
+Pillow
+paddleocr
+paddlepaddle

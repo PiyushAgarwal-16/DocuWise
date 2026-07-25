@@ -19,18 +19,21 @@ import os
 import time
 from typing import Optional
 
+from config import OCR_ENABLED
+from core import content_cache
 from core.analyzer import analyze_document
 from core.database import (
     _connect,
     cleanup_missing_files,
-    copy_analysis_from_cache,
-    find_by_md5,
     get_documents_by_status,
+    get_documents_for_ocr_retry,
     init_db,
     update_document_status,
 )
 from core.embedder import detect_duplicates, embed_document
 from core.extractor import process_document
+from core.logging_events import log_event
+from core.ocr import get_ocr_engine
 from core.scanner import scan_folder
 
 logger = logging.getLogger(__name__)
@@ -74,8 +77,16 @@ def process_pending_documents(
             "skipped":   int,   # documents with no extractable text (low word count, etc.)
         }
     """
+    # Work queue: newly discovered / changed docs, plus a one-time OCR retry of
+    # legacy image-only docs now that OCR may be available (Phase 5/9).
     pending = get_documents_by_status("pending") + get_documents_by_status("extracted")
-    # De-duplicate in case a doc appears in both (shouldn't happen, but defensive)
+    if OCR_ENABLED and get_ocr_engine().is_available():
+        retry = get_documents_for_ocr_retry()
+        if retry:
+            logger.info("Queuing %d legacy image-only document(s) for OCR retry.", len(retry))
+            pending += retry
+
+    # De-duplicate in case a doc appears in more than one bucket.
     seen: set = set()
     unique_pending = []
     for d in pending:
@@ -85,13 +96,17 @@ def process_pending_documents(
     pending = unique_pending
     total = len(pending)
 
+    counters = {
+        "processed": 0, "failed": 0, "skipped": 0, "image_only": 0,
+        "content_cache_hits": 0, "cache_misses": 0,
+        "nvidia_skipped": 0, "embeddings_reused": 0, "ocr_documents": 0,
+    }
+
     if total == 0:
         logger.info("No pending/extracted documents — pipeline has nothing to do.")
-        return {"processed": 0, "failed": 0, "skipped": 0, "image_only": 0}
+        return counters
 
     logger.info("Pipeline starting — %d pending document(s) to process.", total)
-    counters = {"processed": 0, "failed": 0, "skipped": 0, "image_only": 0,
-                "cache_hits": 0, "cache_misses": 0}
 
     for index, doc in enumerate(pending, start=1):
         if is_cancelled and is_cancelled():
@@ -103,74 +118,56 @@ def process_pending_documents(
 
         logger.info("[%d/%d] Processing: '%s'", index, total, filename)
 
-        # ── Missing-file guard (Task 8) ──────────────────────────────────────
-        # If the file was deleted between the scan and pipeline stages, mark
-        # it as 'missing' and skip ALL processing stages immediately.
+        # ── Missing-file guard ───────────────────────────────────────────────
         if not os.path.exists(file_path):
-            logger.warning(
-                "[MISSING] '%s' not found on disk — skipping all stages.", filename
-            )
+            logger.warning("[MISSING] '%s' not found on disk — skipping all stages.", filename)
             update_document_status(file_path, "missing")
             counters["failed"] += 1
             _report_progress(progress_callback, index, total, filename)
             continue
 
         doc_failed = False
-        doc_skipped = False
 
-        # ── Stage 1: Extract ─────────────────────────────────────────────────
+        # ── Stage 1: Extract (native + MD5 + Content Cache + OCR) ─────────────
         try:
             extraction = process_document(file_path)
-            if not extraction.success:
-                logger.warning("Extract FAILED for '%s': %s", filename, extraction.error_message)
-                doc_failed = True
-            elif extraction.image_only:
-                # Image-based PDF: extraction succeeded but no text was found.
-                # Skip Gemini analysis and embedding — this is not a failure.
-                logger.info("Image-only PDF skipped (no OCR): '%s'", filename)
-                counters["image_only"] += 1
-                _report_progress(progress_callback, index, total, filename)
-                continue
         except Exception as exc:  # noqa: BLE001
             logger.error("Extract raised exception for '%s': %s", filename, exc, exc_info=True)
-            doc_failed = True
-
-        if doc_failed:
+            update_document_status(file_path, "failed", error_message=str(exc))
             counters["failed"] += 1
             _report_progress(progress_callback, index, total, filename)
             continue
 
-        # ── Stage 1b: MD5 Content Cache ──────────────────────────────────────
-        # After extraction the md5_hash is stored in the DB. Check if another
-        # document with the same hash was already fully processed. If so, copy
-        # its analysis + embedding directly — no LLM or embedder call needed.
-        try:
-            conn = _connect()
-            md5_row = conn.execute(
-                "SELECT md5_hash FROM documents WHERE file_path = ? LIMIT 1",
-                (file_path,),
-            ).fetchone()
-            conn.close()
-            current_md5 = md5_row["md5_hash"] if md5_row else None
-        except Exception:
-            current_md5 = None
+        if not extraction.success:
+            logger.warning("Extract FAILED for '%s': %s", filename, extraction.error_message)
+            counters["failed"] += 1
+            _report_progress(progress_callback, index, total, filename)
+            continue
 
-        if current_md5:
-            cache_source = find_by_md5(current_md5, exclude_file_path=file_path)
-            if cache_source:
-                src_name = cache_source.get("filename", "unknown")
-                logger.info(
-                    "[CACHE HIT] '%s' ← '%s' (md5=%s…)",
-                    filename, src_name, current_md5[:8],
-                )
-                _report_progress(progress_callback, index, total,
-                                 f"{filename}  [cache hit ← {src_name}]")
-                copy_analysis_from_cache(file_path, cache_source)
-                counters["cache_hits"]  += 1
-                counters["processed"]   += 1
-                continue   # skip Stage 2 (Analyze) and Stage 3 (Embed)
+        if extraction.ocr_pages_processed:
+            counters["ocr_documents"] += 1
+
+        # ── Content Cache: complete hit → analysis + embedding already restored
+        if extraction.cache_hit:
+            log_event(logger, "NVIDIA_SKIPPED_CACHE", file=filename, md5=extraction.md5_hash)
+            log_event(logger, "EMBEDDING_SKIPPED_CACHE", file=filename, md5=extraction.md5_hash)
+            counters["content_cache_hits"] += 1
+            counters["nvidia_skipped"] += 1
+            counters["embeddings_reused"] += 1
+            counters["processed"] += 1
+            _report_progress(progress_callback, index, total, f"{filename}  [cache hit]")
+            continue
+
+        # ── Image-only: no usable text → skip analysis + embedding (not failure)
+        if extraction.image_only:
+            logger.info("Image-only document (no text): '%s'", filename)
+            counters["image_only"] += 1
+            _report_progress(progress_callback, index, total, filename)
+            continue
 
         counters["cache_misses"] += 1
+
+        # ── Stage 2: Analyze ─────────────────────────────────────────────────
         try:
             analysis = analyze_document(file_path)
             if not analysis.success:
@@ -197,17 +194,26 @@ def process_pending_documents(
 
         if doc_failed:
             counters["failed"] += 1
-        else:
-            counters["processed"] += 1
-            logger.info("Completed '%s' ✓", filename)
+            _report_progress(progress_callback, index, total, filename)
+            continue
 
+        # ── Stage 4: Finalise the Content Cache (embedding + analysis) ────────
+        # Now future byte-identical files become a complete cache hit and skip
+        # OCR, NVIDIA, and embedding entirely.
+        try:
+            content_cache.store_from_document(file_path)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Content cache finalise skipped for '%s': %s", filename, exc)
+
+        counters["processed"] += 1
+        logger.info("Completed '%s' ✓", filename)
         _report_progress(progress_callback, index, total, filename)
 
     logger.info(
-        "Pipeline complete — processed=%d  failed=%d  image_only=%d  skipped=%d"
-        "  cache_hits=%d  cache_misses=%d",
+        "Pipeline complete — processed=%d  failed=%d  image_only=%d"
+        "  content_cache_hits=%d  cache_misses=%d  ocr_docs=%d",
         counters["processed"], counters["failed"], counters["image_only"],
-        counters["skipped"], counters["cache_hits"], counters["cache_misses"],
+        counters["content_cache_hits"], counters["cache_misses"], counters["ocr_documents"],
     )
     return counters
 
@@ -379,6 +385,28 @@ def run_full_scan(
 
     # Ensure DB schema is up to date (idempotent — safe to call every run).
     init_db()
+
+    # Reset the per-scan LLM request budget so each scan starts with a full
+    # allowance (the server process is long-lived; without this the budget would
+    # leak across scans and silently force heuristic-only analysis).
+    try:
+        from core.llm_provider import reset_scan_budget
+        reset_scan_budget()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Could not reset scan budget: %s", exc)
+
+    # Warm up the OCR model once, up front, so the first scanned document does
+    # not pay the load cost mid-scan (Phase 8 — singleton, loaded once).
+    if OCR_ENABLED:
+        try:
+            engine = get_ocr_engine()
+            engine.warmup()
+            logger.info(
+                "OCR engine: %s (%s) — available=%s",
+                engine.name, engine.version, engine.is_available(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("OCR warmup failed (continuing without OCR): %s", exc)
 
     # ── Stage 0: Mark deleted files as missing ────────────────────────────────
     # Must run before scan so already-indexed files that were physically deleted

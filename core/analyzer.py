@@ -18,6 +18,7 @@ from typing import Optional
 
 from config import API_CALL_DELAY_SECONDS, ENABLE_ANALYSIS_CACHE, ENABLE_FALLBACK_ANALYSIS
 from core.database import _connect, update_document_analysis, update_document_status
+from core.logging_events import log_event
 from core.llm_provider import (
     DocumentAnalysis,
     HeuristicProvider,
@@ -136,7 +137,8 @@ def analyze_document(
 
     # ── Part 3 — Cache check ───────────────────────────────────────────────
     if ENABLE_ANALYSIS_CACHE and _is_cache_valid(doc):
-        logger.info("CACHE HIT - skipped NVIDIA request for '%s'", doc.get("filename"))
+        log_event(logger, "NVIDIA_SKIPPED_CACHE", file=doc.get("filename"),
+                  md5=doc.get("md5_hash"), reason="analyzed_unchanged")
         _metrics["documents_cached"] += 1
         _metrics["api_calls_saved"] += 1
         return _build_from_cache(doc)

@@ -35,9 +35,10 @@ export default function ImagePdfs({ folder }: { folder?: string }) {
   return (
     <div className="h-full flex flex-col animate-in fade-in">
       <div className="p-6 pb-2 shrink-0">
-        <h1 className="text-2xl font-bold tracking-tight mb-1">Image PDFs</h1>
+        <h1 className="text-2xl font-bold tracking-tight mb-1">Image-Only Documents</h1>
         <p className="text-muted-foreground text-sm">
-          These PDFs contain no extractable text. They are likely scanned documents that require OCR processing.
+          These documents yielded no text — even after OCR. They may be blank scans, photos without
+          text, or require an OCR engine that is not currently installed.
         </p>
       </div>
 

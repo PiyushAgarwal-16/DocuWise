@@ -89,5 +89,37 @@ export const api = {
       throw new Error("Failed to stop scan");
     }
     return res.json();
-  }
+  },
+
+  search: async (query: string, limit?: number, category?: string) => {
+    const res = await fetch(`${API_BASE}/search`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, limit, category }),
+    });
+    if (!res.ok) throw new Error("Search failed");
+    return res.json();
+  },
+
+  suggest: (limit?: number) =>
+    fetcher<{ suggestions: string[] }>(`/suggest${buildQuery({ limit: limit?.toString() })}`),
+
+  getKnowledge: (id: number) =>
+    fetcher<any>(`/documents/${id}/knowledge`),
+
+  getRelated: (id: number, limit?: number) =>
+    fetcher<{ related: any[] }>(`/documents/${id}/related${buildQuery({ limit: limit?.toString() })}`),
+    
+  getRecommended: (limit?: number) =>
+    fetcher<{ reason: string, documents: any[] }>(`/recommended${buildQuery({ limit: limit?.toString() })}`),
+    
+  logSearchClick: async (query: string, document_id: number, position?: number) => {
+    const res = await fetch(`${API_BASE}/search/click`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, document_id, position }),
+    });
+    if (!res.ok) throw new Error("Failed to log search click");
+    return res.json();
+  },
 };

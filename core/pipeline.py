@@ -197,6 +197,20 @@ def process_pending_documents(
             _report_progress(progress_callback, index, total, filename)
             continue
 
+        # ── Stage 3.5: Search Index ──────────────────────────────────────────
+        # Add the new document to the in-memory vector index so it's searchable
+        # immediately, before duplicate detection runs.
+        try:
+            from core.database import get_document
+            from core.search import vector_backend
+            import json
+            doc_record = get_document(file_path)
+            if doc_record and doc_record.get("embedding_json"):
+                emb = json.loads(doc_record["embedding_json"])
+                vector_backend.add_to_index(doc_record["id"], emb)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Search indexing failed for '%s': %s", filename, exc)
+
         # ── Stage 4: Finalise the Content Cache (embedding + analysis) ────────
         # Now future byte-identical files become a complete cache hit and skip
         # OCR, NVIDIA, and embedding entirely.

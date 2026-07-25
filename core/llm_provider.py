@@ -55,6 +55,16 @@ class DocumentAnalysis:
     success: bool = False
     error_message: Optional[str] = None
 
+    # Knowledge profile fields (Phase 2 — Semantic Search)
+    concepts: list[str] = field(default_factory=list)
+    entities: list[dict] = field(default_factory=list)   # [{"name": ..., "type": ...}]
+    domains: list[str] = field(default_factory=list)
+    doc_type: str = ""
+    difficulty: str = ""
+    prerequisites: list[str] = field(default_factory=list)
+    related_topics: list[str] = field(default_factory=list)
+    language: str = ""
+
 
 # ---------------------------------------------------------------------------
 # Part 13 — Observability metrics
@@ -280,7 +290,15 @@ JSON SCHEMA (all fields required):
   "importance_score": <integer 1-10>,
   "deletion_candidate": <true or false>,
   "deletion_reason": "<one short sentence if true, else empty string>",
-  "confidence_score": <float 0.0-1.0>
+  "confidence_score": <float 0.0-1.0>,
+  "concepts": ["<broad topic 1>", "<broad topic 2>"],
+  "entities": [{{"name": "<entity name>", "type": "<entity type>"}}],
+  "domains": ["<academic or professional domain>"],
+  "doc_type": "<document type>",
+  "difficulty": "<beginner, intermediate, or advanced>",
+  "prerequisites": ["<prerequisite topic 1>"],
+  "related_topics": ["<related topic 1>", "<related topic 2>"],
+  "language": "<ISO 639-1 code, e.g. en>"
 }}
 
 ALLOWED CATEGORIES ONLY:
@@ -295,6 +313,14 @@ RULES:
 - deletion_candidate: true only for clearly redundant, empty, or junk content.
 - confidence_score: your certainty about this analysis, 0.0 to 1.0.
 - category MUST be one of the allowed values — use Miscellaneous if unsure.
+- concepts: 3–10 broad topics the document covers (e.g. "operating systems", "concurrency"). Use full canonical names.
+- entities: named things mentioned — languages, frameworks, algorithms, people, tools, etc. For type use: language, framework, library, algorithm, data_structure, concept, person, organization, protocol, platform, database, math_topic, science_topic, tool, other. Always use full canonical names ("JavaScript" not "JS", "Artificial Intelligence" not "AI").
+- domains: 1–3 broad academic or professional domains (e.g. "computer science", "finance").
+- doc_type: one of: lecture notes, textbook, research paper, resume, presentation, cheat sheet, assignment, exam, report, tutorial, guide, reference, letter, form, spreadsheet, other.
+- difficulty: beginner, intermediate, or advanced. Use empty string if not applicable.
+- prerequisites: topics someone should know before reading this document. Empty list if none.
+- related_topics: topics closely related to but not directly covered in this document.
+- language: ISO 639-1 language code ("en" for English, "hi" for Hindi, etc.).
 """
 
 
@@ -350,11 +376,58 @@ def _validate_and_build(data: dict, source: str) -> DocumentAnalysis:
     except (TypeError, ValueError):
         confidence_score = 0.5
 
+    # ── Knowledge profile fields (Phase 2 — Semantic Search) ───────────────
+    raw_concepts = data.get("concepts", [])
+    concepts = (
+        [str(c).strip().lower() for c in raw_concepts if str(c).strip()][:15]
+        if isinstance(raw_concepts, list) else []
+    )
+
+    raw_entities = data.get("entities", [])
+    entities: list[dict] = []
+    if isinstance(raw_entities, list):
+        for ent in raw_entities[:20]:
+            if isinstance(ent, dict) and ent.get("name"):
+                entities.append({
+                    "name": str(ent["name"]).strip(),
+                    "type": str(ent.get("type", "other")).strip().lower(),
+                })
+
+    raw_domains = data.get("domains", [])
+    domains = (
+        [str(d).strip().lower() for d in raw_domains if str(d).strip()][:5]
+        if isinstance(raw_domains, list) else []
+    )
+
+    doc_type = str(data.get("doc_type", "")).strip().lower()
+    difficulty = str(data.get("difficulty", "")).strip().lower()
+    if difficulty not in ("beginner", "intermediate", "advanced"):
+        difficulty = ""
+
+    raw_prereqs = data.get("prerequisites", [])
+    prerequisites = (
+        [str(p).strip().lower() for p in raw_prereqs if str(p).strip()][:10]
+        if isinstance(raw_prereqs, list) else []
+    )
+
+    raw_related = data.get("related_topics", [])
+    related_topics = (
+        [str(r).strip().lower() for r in raw_related if str(r).strip()][:10]
+        if isinstance(raw_related, list) else []
+    )
+
+    language = str(data.get("language", "")).strip().lower()[:10]
+
     return DocumentAnalysis(
         summary=summary, category=category, subject=subject, tags=tags,
         importance_score=importance_score, deletion_candidate=deletion_candidate,
         deletion_reason=deletion_reason, confidence_score=confidence_score,
         analysis_source=source, success=True,
+        # Knowledge fields
+        concepts=concepts, entities=entities, domains=domains,
+        doc_type=doc_type, difficulty=difficulty,
+        prerequisites=prerequisites, related_topics=related_topics,
+        language=language,
     )
 
 
@@ -574,6 +647,17 @@ class HeuristicProvider(LLMProvider):
         "may", "its", "they", "have", "has", "had", "their", "so",
     }
 
+    # Category → domain mapping for heuristic knowledge extraction.
+    _CATEGORY_DOMAINS: dict[str, list[str]] = {
+        "Academic":      ["education"],
+        "Technical":     ["technology", "computer science"],
+        "Finance":       ["finance", "business"],
+        "Legal":         ["law"],
+        "Personal":      ["personal"],
+        "Work":          ["business", "professional"],
+        "Miscellaneous": [],
+    }
+
     def analyze(self, text: str, user_rules: Optional[str] = None) -> DocumentAnalysis:
         words = text.lower().split()
         word_count = len(words)
@@ -614,6 +698,17 @@ class HeuristicProvider(LLMProvider):
                 freq[clean] = freq.get(clean, 0) + 1
         tags = sorted(freq, key=freq.get, reverse=True)[:MAX_TAGS_PER_DOCUMENT]  # type: ignore
 
+        # ── Heuristic knowledge extraction (Phase 2) ──────────────────────
+        # Use matched keywords as basic concepts. No entities (heuristic
+        # cannot reliably extract named entities). Domain from category map.
+        matched_keywords = [
+            kw for cat, kws in self._KEYWORDS.items()
+            if scores.get(cat, 0) > 0
+            for kw in kws if kw in text_lower
+        ]
+        concepts = list(dict.fromkeys(matched_keywords))[:10]  # dedupe, cap
+        domains = self._CATEGORY_DOMAINS.get(category, [])
+
         is_junk = word_count < 50
         _metrics["documents_fallback"] += 1
         return DocumentAnalysis(
@@ -627,6 +722,15 @@ class HeuristicProvider(LLMProvider):
             confidence_score=round(confidence, 2),
             analysis_source="fallback",
             success=True,
+            # Knowledge fields (heuristic)
+            concepts=concepts,
+            entities=[],
+            domains=domains,
+            doc_type="document",
+            difficulty="",
+            prerequisites=[],
+            related_topics=[],
+            language="en",
         )
 
 

@@ -309,6 +309,33 @@ IMPORTANCE_SCORE_THRESHOLD: float = 0.40
 
 
 # =============================================================================
+# 7b. SEARCH CONFIGURATION  (Phase 2 — Knowledge-Aware Semantic Search)
+# =============================================================================
+
+# Signal weights for hybrid search ranking. All weights must sum to 1.0.
+# Adjust without code changes to tune search relevance for different corpora.
+SEARCH_WEIGHTS: dict[str, float] = {
+    "embedding":   0.30,   # Broad semantic similarity (vector cosine)
+    "concepts":    0.25,   # Concept-level match from knowledge profiles
+    "entities":    0.15,   # Named entity match from knowledge profiles
+    "summary":     0.10,   # Keyword match in summary / subject fields
+    "tags":        0.08,   # Tag overlap between query tokens and document tags
+    "domains":     0.07,   # Domain-level match from knowledge profiles
+    "filename":    0.05,   # Filename keyword match
+}
+
+# Boost multipliers (applied multiplicatively after weighted score fusion).
+SEARCH_BOOST_IMPORTANCE: float = 0.05    # Per importance point (1-10)
+SEARCH_BOOST_EXACT_MATCH: float = 1.5    # Multiplier for exact query in subject/filename
+
+# Minimum fused score for a result to be included in search output.
+SEARCH_MIN_SCORE: float = 0.15
+
+# Default number of results returned by the search API.
+SEARCH_DEFAULT_LIMIT: int = 20
+
+
+# =============================================================================
 # 8. CONFIDENCE SCORE CONFIGURATION
 # =============================================================================
 
@@ -343,12 +370,12 @@ FILENAME_HEURISTIC_CONFIDENCE: float = 0.65
 OCR_ENABLED: bool = True
 
 # OCR engine identifier. Resolved by core.ocr.get_ocr_engine().
-# Supported values: "paddleocr". Tesseract is explicitly NOT used (Phase 3).
-OCR_ENGINE: str = "paddleocr"
+# Supported values: "rapidocr" (default), "paddleocr" (legacy).
+OCR_ENGINE: str = "rapidocr"
 
 # Human-readable OCR engine version tag, persisted alongside every OCR result
 # so future model upgrades can be detected and cache entries invalidated.
-OCR_VERSION: str = "paddleocr-2.7"
+OCR_VERSION: str = "rapidocr-1.4.4"
 
 # OCR recognition language passed to the engine (PaddleOCR `lang` argument).
 # "en" = English. Use "ch" for Chinese+English, "latin" for Latin scripts, etc.
@@ -371,19 +398,21 @@ OCR_CACHE_ENABLED: bool = True
 # Soft wall-clock budget (seconds) for OCR of a single document. Once exceeded,
 # remaining pages are skipped and whatever text was recognised so far is kept.
 # Prevents a pathological file from stalling the whole scan.
-OCR_TIMEOUT_SECONDS: float = 120.0
+OCR_TIMEOUT_SECONDS: float = 90.0
 
 # Longest edge (pixels) an image is downscaled to before OCR. Larger images are
 # resized down preserving aspect ratio — bounds memory use and inference time.
-OCR_MAX_IMAGE_SIZE: int = 2600
+OCR_MAX_IMAGE_SIZE: int = 2000
 
 # Maximum number of pages of a single PDF that will be OCR'd. Pages beyond this
 # cap are skipped (counted as skipped) to bound processing time on huge files.
-OCR_MAX_PDF_PAGES: int = 50
+# Kept at 20 for CPU-only setups; increase if running with GPU.
+OCR_MAX_PDF_PAGES: int = 20
 
-# DPI used when rendering a PDF page to a raster image for OCR. 200 DPI is a
-# good accuracy/speed trade-off for typical scanned documents.
-OCR_RENDER_DPI: int = 200
+# DPI used when rendering a PDF page to a raster image for OCR. 150 DPI gives
+# ~1.8x faster rendering vs 200 DPI with negligible accuracy loss on typical
+# scanned documents. Raise to 200+ only for very small or dense text.
+OCR_RENDER_DPI: int = 150
 
 
 # =============================================================================

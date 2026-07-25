@@ -81,7 +81,7 @@ export default function Settings() {
               {config?.ocr_enabled && !config?.ocr_available && (
                 <p className="text-xs text-muted-foreground pt-1">
                   Install the OCR backend to enable scanned-document text recognition:
-                  <code className="ml-1 px-1.5 py-0.5 rounded bg-surface">pip install paddleocr paddlepaddle</code>
+                  <code className="ml-1 px-1.5 py-0.5 rounded bg-surface">pip install rapidocr_onnxruntime</code>
                 </p>
               )}
             </CardContent>

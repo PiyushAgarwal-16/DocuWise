@@ -47,8 +47,12 @@ from core.database import (
 )
 from core.pipeline import run_full_scan
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Configure logging to be highly visible in the terminal
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
+    datefmt="%H:%M:%S"
+)
 logger = logging.getLogger("api_server")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
@@ -62,10 +66,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize DB on startup
+# Initialize DB on startup; eagerly warm up OCR in a background thread so the
+# model is ready before the first scan — eliminates the 2-minute delay.
 @app.on_event("startup")
 def startup_event():
     init_db()
+    # Warm up OCR in background — the model load is ~60-120s and must not block
+    # the health-check endpoint or the frontend's initial API calls.
+    from config import OCR_ENABLED
+    if OCR_ENABLED:
+        import threading
+        def _warmup():
+            try:
+                from core.ocr import get_ocr_engine
+                engine = get_ocr_engine()
+                engine.warmup()
+                logger.info("OCR engine pre-warmed: %s (%s) — available=%s",
+                            engine.name, engine.version, engine.is_available())
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("OCR background warmup failed: %s", exc)
+        threading.Thread(target=_warmup, daemon=True, name="ocr-warmup").start()
 
 # ---------------------------------------------------------------------------
 # Global SSE Queue for Scan Progress
@@ -126,9 +146,24 @@ class SSELogHandler(logging.Handler):
             except ValueError:
                 page = None
 
+        # Parse OCR page-level progress for heartbeat events (e.g. "pages_done=2 total_ocr_pages=29")
+        pages_done = None
+        total_ocr_pages = None
+        m_done = re.search(r"\bpages_done=(\d+)", msg)
+        m_total = re.search(r"\btotal_ocr_pages=(\d+)", msg)
+        if m_done and m_total:
+            try:
+                pages_done = int(m_done.group(1))
+                total_ocr_pages = int(m_total.group(1))
+            except ValueError:
+                pass
+
         event = {"type": "log", "message": msg, "stage": stage}
         if page is not None:
             event["page"] = page
+        if pages_done is not None and total_ocr_pages is not None:
+            event["ocr_pages_done"] = pages_done
+            event["ocr_pages_total"] = total_ocr_pages
 
         try:
             self.q.put_nowait(event)
@@ -450,13 +485,20 @@ async def start_scan(req: ScanRequest):
     def scan_thread():
         global scan_in_progress
         start_time = time.monotonic()
+        first_file_time = None  # Track when first file completes
         
         # Attach log handler to capture granular events
         log_handler = SSELogHandler(scan_event_queue)
         logging.getLogger("core").addHandler(log_handler)
         
         def progress_cb(current, total, filename):
+            nonlocal first_file_time
             elapsed = time.monotonic() - start_time
+            
+            # Record when the first file finishes (absorbs all one-time startup costs)
+            if first_file_time is None:
+                first_file_time = elapsed
+            
             # Infer stage based on cache hit
             stage = "Cache Hit" if "[cache hit" in filename.lower() else "Processing"
             try:
@@ -466,7 +508,8 @@ async def start_scan(req: ScanRequest):
                     "total": total,
                     "filename": filename,
                     "stage": stage,
-                    "elapsed_seconds": elapsed
+                    "elapsed_seconds": elapsed,
+                    "first_file_time": first_file_time,
                 })
             except queue.Full:
                 pass
@@ -512,6 +555,113 @@ async def scan_progress(request: Request):
                 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
+# ---------------------------------------------------------------------------
+# Search Endpoints (Phase 3)
+# ---------------------------------------------------------------------------
+
+class SearchRequest(BaseModel):
+    query: str
+    limit: Optional[int] = 20
+    category: Optional[str] = None
+
+@app.post("/api/search")
+def search_documents(req: SearchRequest):
+    try:
+        from core.search import perform_search
+        from core.database import log_search_query
+        
+        results = perform_search(
+            query=req.query,
+            limit=req.limit or 20,
+            category_filter=req.category
+        )
+        
+        # Log the search query asynchronously or synchronously
+        log_search_query(req.query, len(results))
+        
+        return {"results": results}
+    except Exception as e:
+        logger.error(f"Search failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/suggest")
+def suggest_searches(limit: Optional[int] = 10):
+    try:
+        from core.database import get_recent_searches
+        recent = get_recent_searches(limit=limit or 10)
+        return {"suggestions": [r["query"] for r in recent]}
+    except Exception as e:
+        logger.error(f"Suggest failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ---------------------------------------------------------------------------
+# Knowledge & Related Documents (Phase 4)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/documents/{doc_id}/knowledge")
+def get_document_knowledge(doc_id: int):
+    try:
+        from core.database import get_knowledge_profile
+        profile = get_knowledge_profile(doc_id)
+        if not profile:
+            raise HTTPException(status_code=404, detail="Knowledge profile not found")
+        return profile
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get knowledge profile: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/documents/{doc_id}/related")
+def get_related_documents(doc_id: int, limit: Optional[int] = 5):
+    try:
+        from core.search import find_related_documents
+        related = find_related_documents(doc_id, limit=limit or 5)
+        return {"related": related}
+    except Exception as e:
+        logger.error(f"Failed to find related documents: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/recommended")
+def get_recommended_documents(limit: Optional[int] = 4):
+    try:
+        from core.database import get_recent_searches, _connect, _rows_to_dicts
+        from core.search import perform_search
+        
+        recent = get_recent_searches(limit=1)
+        if recent and recent[0]["query"]:
+            results = perform_search(query=recent[0]["query"], limit=limit or 4)
+            if results:
+                return {"reason": f"Based on your recent search for '{recent[0]['query']}'", "documents": results}
+        
+        # Fallback to top importance
+        conn = _connect()
+        with conn:
+            rows = conn.execute(
+                "SELECT * FROM documents WHERE processing_status IN ('embedded', 'analyzed', 'completed') ORDER BY importance_score DESC LIMIT ?",
+                (limit or 4,)
+            ).fetchall()
+        return {"reason": "Highly rated documents in your workspace", "documents": _rows_to_dicts(rows)}
+    except Exception as e:
+        logger.error(f"Failed to get recommended documents: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+class SearchClickRequest(BaseModel):
+    query: str
+    document_id: int
+    position: Optional[int] = None
+
+@app.post("/api/search/click")
+def log_click(req: SearchClickRequest):
+    try:
+        from core.database import log_search_click
+        log_search_click(req.query, req.document_id, req.position)
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error(f"Failed to log click: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8765)
+    # log_config=None prevents Uvicorn from overriding our custom logging format
+    uvicorn.run(app, host="127.0.0.1", port=8765, log_config=None)

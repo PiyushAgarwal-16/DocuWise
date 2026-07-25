@@ -179,6 +179,22 @@ def analyze_document(
             "Analyzed '%s' | source=%s | category='%s' | importance=%d",
             file_path, analysis.analysis_source, analysis.category, analysis.importance_score,
         )
+
+        # ── Persist knowledge profile (Phase 2 — Semantic Search) ─────────
+        from core.knowledge import persist_knowledge_profile
+        persist_knowledge_profile(
+            file_path,
+            concepts=analysis.concepts,
+            entities=analysis.entities,
+            domains=analysis.domains,
+            doc_type=analysis.doc_type,
+            difficulty=analysis.difficulty,
+            prerequisites=analysis.prerequisites,
+            related_topics=analysis.related_topics,
+            language=analysis.language,
+            confidence=analysis.confidence_score,
+        )
+
     except Exception as exc:  # noqa: BLE001
         msg = f"DB write failed after analysis: {exc}"
         logger.error("DB write failed for '%s': %s", file_path, exc, exc_info=True)
@@ -222,6 +238,27 @@ def _build_from_cache(doc: dict) -> DocumentAnalysis:
     except Exception:  # noqa: BLE001
         tags = []
 
+    # Load knowledge profile if available (Phase 2).
+    concepts, entities, domains = [], [], []
+    doc_type = difficulty = language = ""
+    prerequisites, related_topics = [], []
+    doc_id = doc.get("id")
+    if doc_id is not None:
+        try:
+            from core.database import get_knowledge_profile
+            kp = get_knowledge_profile(doc_id)
+            if kp:
+                concepts = _json.loads(kp.get("concepts_json") or "[]")
+                entities = _json.loads(kp.get("entities_json") or "[]")
+                domains = _json.loads(kp.get("domains_json") or "[]")
+                doc_type = kp.get("doc_type") or ""
+                difficulty = kp.get("difficulty") or ""
+                prerequisites = _json.loads(kp.get("prerequisites_json") or "[]")
+                related_topics = _json.loads(kp.get("related_topics_json") or "[]")
+                language = kp.get("language") or ""
+        except Exception:  # noqa: BLE001
+            pass  # Knowledge data is optional for cache
+
     return DocumentAnalysis(
         summary=doc.get("summary") or "",
         category=doc.get("category") or "Miscellaneous",
@@ -233,6 +270,15 @@ def _build_from_cache(doc: dict) -> DocumentAnalysis:
         confidence_score=1.0,        # perfect confidence — came from DB
         analysis_source="cached",
         success=True,
+        # Knowledge fields (Phase 2)
+        concepts=concepts,
+        entities=entities,
+        domains=domains,
+        doc_type=doc_type,
+        difficulty=difficulty,
+        prerequisites=prerequisites,
+        related_topics=related_topics,
+        language=language,
     )
 
 

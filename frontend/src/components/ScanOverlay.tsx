@@ -44,6 +44,10 @@ export default function ScanOverlay({ onComplete }: ScanOverlayProps) {
           });
           if (data.filename) setCurrentFile(data.filename.split(/[\\/]/).pop() || "");
           if (data.stage) setStage(data.stage);
+          // Track when the first file completes (from backend's elapsed timer)
+          if (data.first_file_time && firstFileTime === null) {
+            setFirstFileTime(data.first_file_time);
+          }
           // A new file has started — reset the per-file page counter.
           setPage(null);
         }
@@ -92,12 +96,28 @@ export default function ScanOverlay({ onComplete }: ScanOverlayProps) {
     }
   };
 
+  const [firstFileTime, setFirstFileTime] = useState<number | null>(null);
+
   const { current, total } = stats;
   const pct = Math.round((current / total) * 100) || 0;
   
-  const rate = elapsed > 0 ? (current / elapsed) * 60 : 0;
-  const remaining = total - current;
-  const eta = rate > 0 ? remaining / (rate / 60) : 0;
+  // ETA calculation: exclude one-time startup costs (model loading, warmup)
+  // by computing the per-file rate ONLY from files processed after the first one.
+  let rate = 0;
+  let eta = 0;
+  if (current > 1 && firstFileTime !== null) {
+    // Time spent on files 2..current = elapsed - firstFileTime
+    const processingTime = elapsed - firstFileTime;
+    const filesAfterFirst = current - 1;
+    rate = processingTime > 0 ? (filesAfterFirst / processingTime) * 60 : 0;
+    const remaining = total - current;
+    eta = rate > 0 ? remaining / (rate / 60) : 0;
+  } else if (current === 1 && firstFileTime !== null) {
+    // Only first file done — show rough estimate based on that file's OCR time
+    const remaining = total - current;
+    rate = 60 / firstFileTime; // rough
+    eta = remaining * firstFileTime * 0.5; // First file is always slower; halve estimate
+  }
 
   const formatTime = (secs: number) => {
     if (!isFinite(secs) || secs < 0) return "—";

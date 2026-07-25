@@ -7,7 +7,8 @@ import {
   Trash2, 
   Settings,
   FolderOpen,
-  Play
+  Play,
+  Search
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -21,6 +22,7 @@ interface SidebarProps {
 }
 
 const navItems = [
+  { name: "Search", path: "/search", icon: Search },
   { name: "Dashboard", path: "/dashboard", icon: LayoutDashboard },
   { name: "Documents", path: "/documents", icon: Files },
   { name: "Duplicates", path: "/duplicates", icon: Copy },
@@ -41,7 +43,7 @@ export default function Sidebar({ folder, setFolder, onScan, scanning }: Sidebar
   };
 
   return (
-    <div className="w-64 bg-panel border-r border-border flex flex-col h-screen overflow-hidden">
+    <div className="w-64 bg-card border-r border-border flex flex-col h-screen overflow-hidden">
       <div className="p-4 pt-6">
         <h1 className="text-xl font-bold text-foreground px-2">DocuWise</h1>
         <p className="text-[10px] text-muted-foreground uppercase tracking-wider px-2 mb-6">Document Intelligence</p>
@@ -56,7 +58,7 @@ export default function Sidebar({ folder, setFolder, onScan, scanning }: Sidebar
                   "flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors",
                   isActive
                     ? "bg-primary/20 text-primary font-semibold"
-                    : "text-muted-foreground hover:bg-surface hover:text-foreground"
+                    : "text-muted-foreground hover:bg-secondary hover:text-foreground"
                 )
               }
             >
@@ -100,7 +102,7 @@ export default function Sidebar({ folder, setFolder, onScan, scanning }: Sidebar
                 "flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors",
                 isActive
                   ? "bg-primary/20 text-primary"
-                  : "text-muted-foreground hover:bg-surface hover:text-foreground"
+                  : "text-muted-foreground hover:bg-secondary hover:text-foreground"
               )
             }
           >

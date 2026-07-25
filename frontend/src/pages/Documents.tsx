@@ -16,6 +16,8 @@ import {
 } from "@/components/ui/table";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
+import KnowledgePanel from "@/components/ui/KnowledgePanel";
+import RelatedDocuments from "@/components/ui/RelatedDocuments";
 
 export default function Documents({ folder }: { folder?: string }) {
   const [docs, setDocs] = useState<DocumentData[]>([]);
@@ -195,6 +197,16 @@ export default function Documents({ folder }: { folder?: string }) {
                     </div>
                   </div>
                 )}
+                
+                {/* Phase 4 - Knowledge Panel */}
+                <div className="pt-4 border-t border-border">
+                  <KnowledgePanel documentId={selected.id} />
+                </div>
+
+                {/* Phase 4 - Related Documents */}
+                <div className="pt-4 border-t border-border">
+                  <RelatedDocuments documentId={selected.id} />
+                </div>
               </div>
             </div>
           </ScrollArea>

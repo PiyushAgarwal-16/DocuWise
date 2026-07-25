@@ -2,6 +2,7 @@ import { useState } from "react";
 import Sidebar from "./Sidebar";
 import ScanOverlay from "../ScanOverlay";
 import { api } from "@/services/api";
+import SearchBar from "../ui/SearchBar";
 
 interface AppShellProps {
   children: React.ReactNode;
@@ -38,8 +39,14 @@ export default function AppShell({ children, folder, setFolder }: AppShellProps)
         onScan={handleScan} 
         scanning={scanning} 
       />
-      <main className="flex-1 relative h-screen overflow-hidden bg-background">
-        <div key={refreshKey} className="h-full w-full">
+      <main className="flex-1 relative flex flex-col h-screen overflow-hidden bg-background">
+        {/* Top Header */}
+        <header className="h-14 border-b border-border flex items-center px-6 bg-background/80 backdrop-blur-sm z-10 shrink-0">
+          <div className="flex-1 max-w-3xl">
+            <SearchBar />
+          </div>
+        </header>
+        <div key={refreshKey} className="flex-1 overflow-auto w-full relative">
           {children}
         </div>
         {scanning && (

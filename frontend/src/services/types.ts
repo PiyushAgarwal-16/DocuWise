@@ -100,3 +100,44 @@ export interface ScanProgressEvent {
   result?: any;
   error?: string;
 }
+
+export interface SearchResult {
+  id: number;
+  filename: string;
+  file_path: string;
+  category: string;
+  subject: string;
+  summary: string;
+  tags_json: string;
+  importance_score: number;
+  word_count: number;
+  concepts_json: string;
+  entities_json: string;
+  domains_json: string;
+  doc_type: string;
+  vector_score: number;
+  search_score: number;
+  signals: {
+    embedding: number;
+    concepts: number;
+    entities: number;
+    summary: number;
+    tags: number;
+    domains: number;
+    filename: number;
+  };
+}
+
+export interface KnowledgeProfile {
+  document_id: number;
+  concepts_json: string;
+  entities_json: string;
+  domains_json: string;
+  doc_type: string | null;
+  difficulty: string | null;
+  prerequisites_json: string;
+  related_topics_json: string;
+  language: string | null;
+  confidence: number;
+  created_at: string;
+}

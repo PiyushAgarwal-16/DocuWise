@@ -4,25 +4,23 @@ core/ocr.py — Optical Character Recognition layer for DocuWise (Phase 3 & 8).
 Architecture
 ------------
     BaseOCREngine   (abstract interface — the ONLY thing the pipeline knows about)
-        └── PaddleOCREngine   (concrete PaddleOCR-backed implementation)
+        ├── RapidOCREngine    (default — ONNX Runtime-backed, fast CPU inference)
+        └── PaddleOCREngine   (legacy — requires paddlepaddle, slower on CPU)
 
-The extraction pipeline never imports or references PaddleOCR directly. It only
-depends on ``BaseOCREngine`` and the ``get_ocr_engine()`` factory, so a future
-engine (e.g. a cloud vision API) can be dropped in by adding one subclass and a
-config value — the Open/Closed principle in practice.
+The extraction pipeline never imports OCR libraries directly. It only depends on
+``BaseOCREngine`` and the ``get_ocr_engine()`` factory, so engines can be swapped
+by changing ``config.OCR_ENGINE``.
 
 Performance (Phase 8)
 ---------------------
-  - The PaddleOCR model is loaded exactly once per process (module-level
-    singleton) and reused for every page and every document.
-  - The heavy ``paddleocr`` import is lazy: it happens inside the engine, not at
-    module import time, so importing this module (and therefore the whole
-    backend) is cheap and never fails when PaddleOCR is not installed.
+  - RapidOCR loads in ~3s (vs ~12s for PaddleOCR) with models bundled in-package.
+  - No separate model downloads, no paddlepaddle dependency, no numpy conflicts.
+  - Uses ONNX Runtime for CPU-optimized inference with multi-threading.
   - Images are downscaled to ``OCR_MAX_IMAGE_SIZE`` before recognition.
 
 Resilience (Phase 12)
 ---------------------
-  - If PaddleOCR is not installed or fails to initialise, ``get_ocr_engine()``
+  - If the OCR library is not installed or fails to initialise, ``get_ocr_engine()``
     returns an engine whose ``is_available()`` is False. Callers then skip OCR
     and fall back to native text / ``image_only`` — OCR failure never crashes a
     scan.
@@ -149,7 +147,138 @@ class _UnavailableOCREngine(BaseOCREngine):
 
 
 # ---------------------------------------------------------------------------
-# PaddleOCR engine
+# RapidOCR engine (default — ONNX Runtime)
+# ---------------------------------------------------------------------------
+
+class RapidOCREngine(BaseOCREngine):
+    """
+    RapidOCR-backed OCR engine using ONNX Runtime.
+
+    Uses the same PP-OCR models as PaddleOCR but exported to ONNX format,
+    running through ONNX Runtime instead of PaddlePaddle. This eliminates
+    all heavy-framework dependencies and provides faster CPU inference.
+
+    Models are bundled inside the ``rapidocr_onnxruntime`` pip package (~15 MB),
+    so there are no first-run model downloads.
+    """
+
+    name = "rapidocr"
+
+    def __init__(self, language: str = OCR_LANGUAGE, version: str = OCR_VERSION) -> None:
+        import threading
+        self.version = version
+        self._language = language
+        self._model: Optional[Any] = None
+        self._load_error: Optional[str] = None
+        self._lock = threading.Lock()
+
+    def _ensure_model(self) -> bool:
+        """Lazily construct the RapidOCR model. Thread-safe."""
+        if self._model is not None:
+            return True
+        if self._load_error is not None:
+            return False
+
+        with self._lock:
+            if self._model is not None:
+                return True
+            if self._load_error is not None:
+                return False
+
+            try:
+                from rapidocr_onnxruntime import RapidOCR
+            except Exception as exc:  # noqa: BLE001
+                self._load_error = f"rapidocr import failed: {exc}"
+                logger.warning(
+                    "OCR disabled — %s. Install with: pip install rapidocr_onnxruntime",
+                    self._load_error,
+                )
+                return False
+
+            try:
+                import os
+                threads = min(os.cpu_count() or 4, 8)
+                t0 = time.time()
+                self._model = RapidOCR(
+                    rec_batch_num=1,
+                    intra_op_num_threads=threads,
+                )
+                logger.info(
+                    "RapidOCR model loaded (threads=%d, %.1fs) — %s",
+                    threads, time.time() - t0, self.version,
+                )
+                return True
+            except Exception as exc:  # noqa: BLE001
+                self._load_error = f"RapidOCR init failed: {exc}"
+                logger.error("OCR disabled — %s", self._load_error)
+                return False
+
+    def is_available(self) -> bool:
+        return self._ensure_model()
+
+    def warmup(self) -> None:
+        self._ensure_model()
+
+    def recognize(self, image: Any) -> OCRResult:
+        if not self._ensure_model():
+            return OCRResult(success=False, error_message=self._load_error or "model not loaded")
+
+        try:
+            array = self._to_ndarray(image)
+        except Exception as exc:  # noqa: BLE001
+            return OCRResult(success=False, error_message=f"image conversion failed: {exc}")
+
+        try:
+            result, _elapse = self._model(array)
+            if not result:
+                return OCRResult(text="", confidence=0.0, line_count=0, success=True)
+
+            texts = []
+            confidences = []
+            for line in result:
+                # line = [box_coords, text, confidence]
+                text = str(line[1]).strip()
+                conf = float(line[2])
+                if text:
+                    texts.append(text)
+                    confidences.append(conf)
+
+            text = "\n".join(texts).strip()
+            confidence = (sum(confidences) / len(confidences)) if confidences else 0.0
+            return OCRResult(
+                text=text,
+                confidence=round(float(confidence), 4),
+                line_count=len(texts),
+                success=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("RapidOCR recognition error: %s", exc)
+            return OCRResult(success=False, error_message=f"OCR error: {exc}")
+
+    @staticmethod
+    def _to_ndarray(image: Any):
+        """Normalise image to RGB ndarray, downscale if oversized."""
+        import numpy as np
+
+        if hasattr(image, "convert") and hasattr(image, "size"):
+            pil = image.convert("RGB")
+            w, h = pil.size
+            longest = max(w, h)
+            if longest > OCR_MAX_IMAGE_SIZE:
+                scale = OCR_MAX_IMAGE_SIZE / longest
+                pil = pil.resize((max(1, int(w * scale)), max(1, int(h * scale))))
+            return np.asarray(pil)
+
+        arr = np.asarray(image)
+        if arr.ndim == 2:
+            arr = np.stack([arr] * 3, axis=-1)
+        elif arr.ndim == 3 and arr.shape[2] == 4:
+            arr = arr[:, :, :3]
+        return arr
+
+
+# ---------------------------------------------------------------------------
+# PaddleOCR engine (legacy)
 # ---------------------------------------------------------------------------
 
 class PaddleOCREngine(BaseOCREngine):
@@ -166,11 +295,13 @@ class PaddleOCREngine(BaseOCREngine):
     name = "paddleocr"
 
     def __init__(self, language: str = OCR_LANGUAGE, version: str = OCR_VERSION) -> None:
+        import threading
         self.version = version
         self._language = language
         self._model: Optional[Any] = None
         self._load_error: Optional[str] = None
         self._use_predict_api = False  # PaddleOCR ≥ 3.0 renamed .ocr() → .predict()
+        self._lock = threading.Lock()  # Prevent double-loading from concurrent threads
 
     # -- model loading ------------------------------------------------------
 
@@ -180,47 +311,60 @@ class PaddleOCREngine(BaseOCREngine):
 
         The result (success or the failure reason) is memoised so a missing
         dependency is only diagnosed once per process instead of on every page.
+        Thread-safe: uses a lock to prevent concurrent loads.
         """
         if self._model is not None:
             return True
         if self._load_error is not None:
             return False
 
-        try:
-            from paddleocr import PaddleOCR  # lazy, heavy import
-        except Exception as exc:  # noqa: BLE001 — ImportError or transitive failure
-            self._load_error = f"paddleocr import failed: {exc}"
-            logger.warning(
-                "OCR disabled — %s. Install with: pip install paddleocr paddlepaddle",
-                self._load_error,
-            )
-            return False
-
-        # PaddleOCR's constructor signature has drifted across versions. Try the
-        # modern keyword set first, then fall back to a minimal call.
-        last_exc: Optional[Exception] = None
-        for kwargs in (
-            {"use_angle_cls": True, "lang": self._language, "show_log": False},
-            {"use_angle_cls": True, "lang": self._language},
-            {"lang": self._language},
-            {},
-        ):
-            try:
-                t0 = time.time()
-                self._model = PaddleOCR(**kwargs)
-                self._use_predict_api = not hasattr(self._model, "ocr")
-                logger.info(
-                    "PaddleOCR model loaded (lang=%s, %.1fs) — %s",
-                    self._language, time.time() - t0, self.version,
-                )
+        with self._lock:
+            # Double-check after acquiring lock (another thread may have loaded it)
+            if self._model is not None:
                 return True
-            except Exception as exc:  # noqa: BLE001
-                last_exc = exc
-                continue
+            if self._load_error is not None:
+                return False
 
-        self._load_error = f"PaddleOCR init failed: {last_exc}"
-        logger.error("OCR disabled — %s", self._load_error)
-        return False
+            try:
+                from paddleocr import PaddleOCR  # lazy, heavy import
+            except Exception as exc:  # noqa: BLE001 — ImportError or transitive failure
+                self._load_error = f"paddleocr import failed: {exc}"
+                logger.warning(
+                    "OCR disabled — %s. Install with: pip install paddleocr paddlepaddle",
+                    self._load_error,
+                )
+                return False
+
+            # PaddleOCR's constructor signature has drifted across versions. Try the
+            # most optimized keyword set first (MKLDNN for CPU acceleration), then
+            # fall back to simpler configs.
+            import os
+            cpu_threads = min(os.cpu_count() or 4, 8)  # Use up to 8 cores
+            last_exc: Optional[Exception] = None
+            for kwargs in (
+                {"use_angle_cls": True, "lang": self._language, "show_log": False,
+                 "enable_mkldnn": True, "cpu_threads": cpu_threads},
+                {"use_angle_cls": True, "lang": self._language, "show_log": False},
+                {"use_angle_cls": True, "lang": self._language},
+                {"lang": self._language},
+                {},
+            ):
+                try:
+                    t0 = time.time()
+                    self._model = PaddleOCR(**kwargs)
+                    self._use_predict_api = not hasattr(self._model, "ocr")
+                    logger.info(
+                        "PaddleOCR model loaded (lang=%s, %.1fs) — %s",
+                        self._language, time.time() - t0, self.version,
+                    )
+                    return True
+                except Exception as exc:  # noqa: BLE001
+                    last_exc = exc
+                    continue
+
+            self._load_error = f"PaddleOCR init failed: {last_exc}"
+            logger.error("OCR disabled — %s", self._load_error)
+            return False
 
     def is_available(self) -> bool:
         return self._ensure_model()
@@ -394,7 +538,9 @@ def get_ocr_engine() -> BaseOCREngine:
         return _engine_instance
 
     name = (OCR_ENGINE or "").strip().lower()
-    if name == "paddleocr":
+    if name == "rapidocr":
+        _engine_instance = RapidOCREngine()
+    elif name == "paddleocr":
         _engine_instance = PaddleOCREngine()
     elif name in ("", "none", "disabled"):
         _engine_instance = _UnavailableOCREngine("OCR_ENGINE not configured")

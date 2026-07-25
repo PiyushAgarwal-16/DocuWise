@@ -231,6 +231,65 @@ def init_db() -> None:
                 created_at              TEXT NOT NULL,
                 updated_at              TEXT NOT NULL
             );
+
+            -- ----------------------------------------------------------------
+            -- knowledge_profiles: deep knowledge extracted per document
+            --   (Phase 2 — Knowledge-Aware Semantic Search)
+            --
+            -- One row per fully-analyzed document. Stores concepts, entities,
+            -- domains, and other semantic metadata as JSON. Kept separate from
+            -- the documents table to avoid bloating the 25+ column main table
+            -- and to allow independent rebuilds.
+            -- ----------------------------------------------------------------
+            CREATE TABLE IF NOT EXISTS knowledge_profiles (
+                document_id         INTEGER PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
+
+                -- Semantic knowledge (all JSON)
+                concepts_json       TEXT,           -- ["operating systems", "concurrency"]
+                entities_json       TEXT,           -- [{"name":"Mutex","type":"concept"}]
+                domains_json        TEXT,           -- ["computer science"]
+                doc_type            TEXT,           -- "lecture notes" | "research paper" | ...
+                difficulty          TEXT,           -- "beginner" | "intermediate" | "advanced"
+                prerequisites_json  TEXT,           -- ["data structures"]
+                related_topics_json TEXT,           -- ["distributed systems"]
+                language            TEXT,           -- "en" | "hi" | "mixed"
+                confidence          REAL,           -- extraction confidence 0.0-1.0
+
+                -- Audit timestamps
+                created_at          TEXT NOT NULL,
+                updated_at          TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_kp_doc
+                ON knowledge_profiles(document_id);
+
+            -- ----------------------------------------------------------------
+            -- search_history: recent queries for autocomplete & analytics
+            --   (Phase 2 — Knowledge-Aware Semantic Search)
+            -- ----------------------------------------------------------------
+            CREATE TABLE IF NOT EXISTS search_history (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                query               TEXT NOT NULL,
+                result_count        INTEGER,
+                searched_at         TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_sh_query
+                ON search_history(query);
+
+            -- ----------------------------------------------------------------
+            -- search_clicks: instrumentation for Phase 4
+            -- ----------------------------------------------------------------
+            CREATE TABLE IF NOT EXISTS search_clicks (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                query               TEXT    NOT NULL,
+                document_id         INTEGER NOT NULL,
+                position            INTEGER,
+                clicked_at          TEXT    NOT NULL,
+                FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+            );
+            
+            CREATE INDEX IF NOT EXISTS idx_search_clicks_doc ON search_clicks(document_id);
         """)
 
     # ── Column migrations (idempotent ALTER TABLE) ──────────────────────────
@@ -259,6 +318,22 @@ def init_db() -> None:
     }
     for _col, _defn in _extraction_columns.items():
         _add_column_if_missing(table="documents", column=_col, definition=_defn)
+
+    # ── Knowledge Cache columns on content_cache (Phase 2 — Semantic Search) ──
+    # These extend the content_cache so that knowledge profiles are restored
+    # alongside analysis/embedding/OCR data for byte-identical files.
+    _knowledge_cache_columns: dict[str, str] = {
+        "concepts_json":       "TEXT DEFAULT NULL",
+        "entities_json":       "TEXT DEFAULT NULL",
+        "domains_json":        "TEXT DEFAULT NULL",
+        "doc_type":            "TEXT DEFAULT NULL",
+        "difficulty":          "TEXT DEFAULT NULL",
+        "prerequisites_json":  "TEXT DEFAULT NULL",
+        "related_topics_json": "TEXT DEFAULT NULL",
+        "language":            "TEXT DEFAULT NULL",
+    }
+    for _col, _defn in _knowledge_cache_columns.items():
+        _add_column_if_missing(table="content_cache", column=_col, definition=_defn)
 
 
 def _add_column_if_missing(table: str, column: str, definition: str) -> None:
@@ -664,6 +739,101 @@ def get_document(file_path: str) -> Optional[dict]:
 
 
 # ---------------------------------------------------------------------------
+# knowledge_profiles — semantic knowledge per document (Phase 2)
+# ---------------------------------------------------------------------------
+
+def upsert_knowledge_profile(
+    document_id: int,
+    *,
+    concepts_json: Optional[str] = None,
+    entities_json: Optional[str] = None,
+    domains_json: Optional[str] = None,
+    doc_type: Optional[str] = None,
+    difficulty: Optional[str] = None,
+    prerequisites_json: Optional[str] = None,
+    related_topics_json: Optional[str] = None,
+    language: Optional[str] = None,
+    confidence: Optional[float] = None,
+) -> None:
+    """
+    Insert or replace the knowledge profile for a document.
+
+    Uses INSERT OR REPLACE — if a profile already exists for *document_id*,
+    the entire row is replaced. This is safe because knowledge profiles are
+    always written as a complete unit from a single LLM response.
+
+    Args:
+        document_id:         Primary key of the document (documents.id).
+        concepts_json:       JSON array of concept strings.
+        entities_json:       JSON array of entity objects.
+        domains_json:        JSON array of domain strings.
+        doc_type:            Document type classification.
+        difficulty:          Difficulty level string.
+        prerequisites_json:  JSON array of prerequisite topic strings.
+        related_topics_json: JSON array of related topic strings.
+        language:            Detected language code.
+        confidence:          Extraction confidence score 0.0–1.0.
+    """
+    now = _now()
+    conn = _connect()
+    with conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO knowledge_profiles (
+                document_id,
+                concepts_json, entities_json, domains_json,
+                doc_type, difficulty,
+                prerequisites_json, related_topics_json,
+                language, confidence,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                document_id,
+                concepts_json, entities_json, domains_json,
+                doc_type, difficulty,
+                prerequisites_json, related_topics_json,
+                language, confidence,
+                now, now,
+            ),
+        )
+
+
+def get_knowledge_profile(document_id: int) -> Optional[dict]:
+    """
+    Return the knowledge profile for a document, or None if not yet extracted.
+
+    Args:
+        document_id: Primary key of the document (documents.id).
+
+    Returns:
+        Knowledge profile dict (all columns) or None.
+    """
+    conn = _connect()
+    with conn:
+        row = conn.execute(
+            "SELECT * FROM knowledge_profiles WHERE document_id = ? LIMIT 1",
+            (document_id,),
+        ).fetchone()
+    return _row_to_dict(row)
+
+
+def delete_knowledge_profile(document_id: int) -> None:
+    """
+    Delete the knowledge profile for a document (e.g. on re-analysis).
+
+    Args:
+        document_id: Primary key of the document (documents.id).
+    """
+    conn = _connect()
+    with conn:
+        conn.execute(
+            "DELETE FROM knowledge_profiles WHERE document_id = ?",
+            (document_id,),
+        )
+
+
+# ---------------------------------------------------------------------------
 # content_cache — reusable per-content cache (Phase 2)
 # ---------------------------------------------------------------------------
 
@@ -675,6 +845,10 @@ _CONTENT_CACHE_COLUMNS: frozenset[str] = frozenset({
     "importance_score", "analysis_source",
     "ocr_engine", "ocr_version", "ocr_confidence",
     "ocr_processing_time_ms", "ocr_pages_processed",
+    # Knowledge Cache columns (Phase 2 — Semantic Search)
+    "concepts_json", "entities_json", "domains_json",
+    "doc_type", "difficulty", "prerequisites_json",
+    "related_topics_json", "language",
 })
 
 
@@ -1376,3 +1550,51 @@ def get_extraction_metrics(path_prefix: Optional[str] = None) -> dict:
         metrics["avg_ocr_time_ms"] = round(sum(ocr_times) / len(ocr_times), 1)
 
     return metrics
+
+
+# ---------------------------------------------------------------------------
+# Search History (Phase 3)
+# ---------------------------------------------------------------------------
+
+def log_search_query(query: str, result_count: int) -> None:
+    """Log a user search query for analytics and autocomplete."""
+    now = _now()
+    conn = _connect()
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO search_history (query, result_count, searched_at)
+            VALUES (?, ?, ?)
+            """,
+            (query, result_count, now),
+        )
+
+
+def get_recent_searches(limit: int = 10) -> list[dict]:
+    """Retrieve recent unique searches for autocomplete suggestions."""
+    conn = _connect()
+    with conn:
+        rows = conn.execute(
+            """
+            SELECT query, MAX(searched_at) as last_searched
+            FROM search_history
+            GROUP BY query
+            ORDER BY last_searched DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return _rows_to_dicts(rows)
+
+def log_search_click(query: str, document_id: int, position: Optional[int] = None) -> None:
+    """Log when a user clicks a document in search results."""
+    now = _now()
+    conn = _connect()
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO search_clicks (query, document_id, position, clicked_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (query, document_id, position, now),
+        )

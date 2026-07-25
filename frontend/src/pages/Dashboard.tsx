@@ -6,6 +6,7 @@ import {
   Files, CheckCircle2, Copy, Image as ImageIcon, Trash2, AlertTriangle,
   FileText, Layers, ScanText, Database, Zap, Cpu, Timer, Repeat,
 } from "lucide-react";
+import RecommendedDocuments from "@/components/ui/RecommendedDocuments";
 
 export default function Dashboard({ folder }: { folder?: string }) {
   const [stats, setStats] = useState<DashboardStats | null>(null);
@@ -138,6 +139,8 @@ export default function Dashboard({ folder }: { folder?: string }) {
           </CardContent>
         </Card>
       </div>
+
+      <RecommendedDocuments />
     </div>
   );
 }

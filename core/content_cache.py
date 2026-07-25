@@ -61,8 +61,12 @@ def is_complete(entry: Optional[dict]) -> bool:
     """
     True if *entry* holds everything needed to skip OCR, NVIDIA, and embedding.
 
-    Requires final text, an embedding vector, and a summary — the three
-    artefacts of the three expensive stages.
+    Requires final text, an embedding vector, a summary, and knowledge data
+    (concepts_json) — the artefacts of all expensive pipeline stages.
+
+    Entries cached before knowledge extraction was added have concepts_json=NULL
+    and are treated as text+analysis hits (knowledge extraction runs, but OCR
+    and LLM analysis are skipped).
     """
     if not entry:
         return False
@@ -70,6 +74,7 @@ def is_complete(entry: Optional[dict]) -> bool:
         bool((entry.get("final_text") or "").strip())
         and bool((entry.get("embedding_json") or "").strip())
         and bool((entry.get("summary") or "").strip())
+        and bool((entry.get("concepts_json") or "").strip())
     )
 
 
@@ -119,7 +124,16 @@ def lookup(md5_hash: str, exclude_file_path: str = "", filename: str = "") -> Op
 
 def _entry_from_document(doc: dict) -> dict:
     """Adapt a ``documents`` row into the content_cache entry shape."""
-    return {
+    # Look up knowledge profile for this document (if it exists).
+    kp: Optional[dict] = None
+    doc_id = doc.get("id")
+    if doc_id is not None:
+        try:
+            kp = db.get_knowledge_profile(doc_id)
+        except Exception:  # noqa: BLE001
+            kp = None
+
+    result = {
         "final_text": doc.get("extracted_text") or "",
         "native_text": doc.get("extracted_text") or "",
         "ocr_text": None,
@@ -143,6 +157,19 @@ def _entry_from_document(doc: dict) -> dict:
         "highlight": doc.get("highlight"),
         "highlight_reason": doc.get("highlight_reason"),
     }
+
+    # Add knowledge fields from knowledge_profiles if available.
+    if kp:
+        result["concepts_json"] = kp.get("concepts_json")
+        result["entities_json"] = kp.get("entities_json")
+        result["domains_json"] = kp.get("domains_json")
+        result["doc_type"] = kp.get("doc_type")
+        result["difficulty"] = kp.get("difficulty")
+        result["prerequisites_json"] = kp.get("prerequisites_json")
+        result["related_topics_json"] = kp.get("related_topics_json")
+        result["language"] = kp.get("language")
+
+    return result
 
 
 def _backfill(md5_hash: str, entry: dict) -> None:
@@ -180,8 +207,19 @@ def restore_to_document(file_path: str, entry: dict) -> None:
 
     Sets the document to 'embedded' with analysis_source='cached'. The caller is
     responsible for having verified :func:`is_complete` first.
+
+    Also restores the knowledge profile (Phase 2) if the entry carries
+    knowledge data (concepts_json is non-null).
     """
     db.restore_document_from_cache(file_path, entry)
+
+    # Restore knowledge profile from cached knowledge fields.
+    if (entry.get("concepts_json") or "").strip():
+        try:
+            from core.knowledge import restore_knowledge_from_cache
+            restore_knowledge_from_cache(file_path, entry)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Knowledge profile restore skipped for '%s': %s", file_path, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -243,23 +281,42 @@ def store_from_document(file_path: str) -> None:
         return
 
     try:
-        db.content_cache_upsert(
-            doc["md5_hash"],
-            final_text=doc.get("extracted_text"),
-            extraction_method=doc.get("extraction_method"),
-            embedding_json=doc.get("embedding_json"),
-            summary=doc.get("summary"),
-            category=doc.get("category"),
-            subject=doc.get("subject"),
-            tags_json=doc.get("tags_json"),
-            importance_score=doc.get("importance_score"),
-            analysis_source=doc.get("analysis_source"),
-            ocr_engine=doc.get("ocr_engine"),
-            ocr_version=doc.get("ocr_version"),
-            ocr_confidence=doc.get("ocr_confidence"),
-            ocr_pages_processed=doc.get("ocr_pages_processed"),
-            ocr_processing_time_ms=doc.get("ocr_processing_time_ms"),
-        )
+        # Build the fields dict, including knowledge data from knowledge_profiles.
+        cache_fields = {
+            "final_text": doc.get("extracted_text"),
+            "extraction_method": doc.get("extraction_method"),
+            "embedding_json": doc.get("embedding_json"),
+            "summary": doc.get("summary"),
+            "category": doc.get("category"),
+            "subject": doc.get("subject"),
+            "tags_json": doc.get("tags_json"),
+            "importance_score": doc.get("importance_score"),
+            "analysis_source": doc.get("analysis_source"),
+            "ocr_engine": doc.get("ocr_engine"),
+            "ocr_version": doc.get("ocr_version"),
+            "ocr_confidence": doc.get("ocr_confidence"),
+            "ocr_pages_processed": doc.get("ocr_pages_processed"),
+            "ocr_processing_time_ms": doc.get("ocr_processing_time_ms"),
+        }
+
+        # Include knowledge profile data in the cache entry.
+        doc_id = doc.get("id")
+        if doc_id is not None:
+            try:
+                kp = db.get_knowledge_profile(doc_id)
+                if kp:
+                    cache_fields["concepts_json"] = kp.get("concepts_json")
+                    cache_fields["entities_json"] = kp.get("entities_json")
+                    cache_fields["domains_json"] = kp.get("domains_json")
+                    cache_fields["doc_type"] = kp.get("doc_type")
+                    cache_fields["difficulty"] = kp.get("difficulty")
+                    cache_fields["prerequisites_json"] = kp.get("prerequisites_json")
+                    cache_fields["related_topics_json"] = kp.get("related_topics_json")
+                    cache_fields["language"] = kp.get("language")
+            except Exception:  # noqa: BLE001
+                pass  # Knowledge data is optional for cache completeness
+
+        db.content_cache_upsert(doc["md5_hash"], **cache_fields)
     except Exception as exc:  # noqa: BLE001
         logger.warning("content_cache finalise failed for '%s': %s", file_path, exc)
 

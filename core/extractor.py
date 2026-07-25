@@ -446,7 +446,9 @@ def _extract_pdf_with_ocr(file_path: str, page_texts: list[str], filename: str) 
                 outcome.ocr_pages_processed += 1
                 log_event(logger, "OCR_PAGE_COMPLETED", file=filename, page=i + 1,
                           confidence=round(result.confidence, 3),
-                          lines=result.line_count)
+                          lines=result.line_count,
+                          pages_done=outcome.ocr_pages_processed,
+                          total_ocr_pages=len(poor_pages))
             else:
                 # OCR yielded nothing usable — keep whatever native text existed.
                 if native:
